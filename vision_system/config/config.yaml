@@ -1,0 +1,68 @@
+# ============================================================================
+# Weed Detection — Configuration
+# ============================================================================
+# Edit values here to change behaviour. No need to touch the main script.
+# See README.md for guidance on when to adjust each parameter.
+# ============================================================================
+
+model:
+  model_id: "nvidia/LocateAnything-3B"
+  device: "cpu"          # "cpu" or "cuda" (set to "cuda" when GPU is available)
+  dtype: "float32"        # "float32" (CPU) or "float16" (GPU, faster)
+
+paths:
+  input_dir: "weed_images"           # folder with your weed images
+  output_dir: "weed_detections"      # annotated images saved here
+  results_file: "detections.json"    # all bounding boxes saved here
+
+detection:
+  # Natural language prompt(s) sent to the model.
+  # Try a more specific prompt if results are noisy or missing weed types,
+  # e.g. "Locate all broadleaf weeds between the crop rows."
+  prompts:
+    - "Locate all weeds in this image."
+
+  supported_extensions:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".bmp"
+    - ".webp"
+
+  # LocateAnything doesn't output confidence scores natively;
+  # 0.0 accepts all raw detections (before filtering below).
+  conf_threshold: 0.0
+
+generation:
+  # Maximum length of the model's response per image.
+  # Increase if many weeds per image cause output to be cut off.
+  max_new_tokens: 512
+
+  # How strongly the model is discouraged from repeating recent tokens.
+  # Increase (e.g. 1.5) if it still loops/repeats boxes.
+  # Decrease if it misses legitimately repeated detections.
+  repetition_penalty: 1.3
+
+  # Blocks the model from repeating any N-token sequence already generated.
+  # Decrease (e.g. 4-6) for stronger anti-repetition if loops persist.
+  # Increase if valid output is being cut off too early.
+  no_repeat_ngram_size: 8
+
+filtering:
+  # Minimum box size, as a fraction of total image area, to be kept.
+  # Increase if small junk boxes still appear.
+  # Decrease if real small/young weeds get filtered out.
+  min_box_area_fraction: 0.005
+
+  # How much of a smaller box must overlap a larger accepted box before
+  # the smaller one is dropped as junk (0.0-1.0).
+  # Decrease (e.g. 0.8) if overlapping junk boxes aren't removed.
+  # Increase (closer to 1.0) if adjacent real weeds get merged into one.
+  containment_threshold: 0.9
+
+visualization:
+  box_color_bgr: [0, 255, 0]    # green, OpenCV BGR order
+  box_thickness: 2
+  label_color_bgr: [0, 255, 0]
+  font: "FONT_HERSHEY_SIMPLEX"
+  font_scale: 0.6

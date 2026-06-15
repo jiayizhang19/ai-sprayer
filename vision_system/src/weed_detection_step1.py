@@ -5,11 +5,12 @@ Processes a folder of images and saves annotated results.
 The detect_weeds() function is deliberately kept self-contained
 so it can be dropped into a camera loop later with zero changes.
 
-Hardware: CPU (default)
-To switch to GPU later: change DEVICE = "cpu" -> DEVICE = "cuda"
+All settings are loaded from config/config.yaml — edit that file to
+change behaviour. No need to edit this script.
 """
 
 import os
+import sys
 import json
 import re
 import time
@@ -21,39 +22,42 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoModel
 
+# This script lives in vision_system/src/. config/ lives in vision_system/.
+# Add vision_system/ to the path so `config.config_loader` can be imported.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config.config_loader import load_config
+
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
+# All values below are loaded from config/config.yaml.
+# Edit that file to change paths, prompts, thresholds, generation settings, etc.
 
-MODEL_ID   = "nvidia/LocateAnything-3B"
-DEVICE     = "cpu"          # <-- change to "cuda" when you have a GPU
-DTYPE      = torch.float32  # <-- change to torch.float16 on GPU for speed
+cfg = load_config()
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-INPUT_DIR  = PROJECT_ROOT / "weed_images"      # folder with your weed images
-OUTPUT_DIR = PROJECT_ROOT / "weed_detections"  # annotated images saved here
-RESULTS_FILE = PROJECT_ROOT / "detections.json"  # all bounding boxes saved here
+MODEL_ID   = cfg["MODEL_ID"]
+DEVICE     = cfg["DEVICE"]
+DTYPE      = cfg["DTYPE"]
 
-# What to ask the model. You can experiment with different prompts.
-# More specific prompts can improve results for your crop type.
-DETECTION_PROMPTS = [
-    "Locate all weeds in this image.",
-    # "Locate all broadleaf weeds between the crop rows.",  # try this if results are noisy
-]
+INPUT_DIR    = cfg["INPUT_DIR"]
+OUTPUT_DIR   = cfg["OUTPUT_DIR"]
+RESULTS_FILE = cfg["RESULTS_FILE"]
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+DETECTION_PROMPTS    = cfg["DETECTION_PROMPTS"]
+SUPPORTED_EXTENSIONS = cfg["SUPPORTED_EXTENSIONS"]
+CONF_THRESHOLD       = cfg["CONF_THRESHOLD"]
 
-# Visual settings for drawn boxes
-BOX_COLOR     = (0, 255, 0)   # green in BGR
-BOX_THICKNESS = 2
-LABEL_COLOR   = (0, 255, 0)
-FONT          = cv2.FONT_HERSHEY_SIMPLEX
-FONT_SCALE    = 0.6
-CONF_THRESHOLD = 0.0   # LocateAnything doesn't output confidence scores natively;
-                        # set to 0 to accept all detections
+MAX_NEW_TOKENS        = cfg["MAX_NEW_TOKENS"]
+REPETITION_PENALTY    = cfg["REPETITION_PENALTY"]
+NO_REPEAT_NGRAM_SIZE  = cfg["NO_REPEAT_NGRAM_SIZE"]
 
-# Post-processing filters for degenerate/junk boxes from repetition loops
-MIN_BOX_AREA_FRACTION = 0.005   # box must cover at least 0.5% of image area to be kept
-CONTAINMENT_THRESHOLD = 0.9     # if >=90% of a smaller box's area lies inside a larger
-                                 # already-accepted box, the smaller one is dropped
+MIN_BOX_AREA_FRACTION = cfg["MIN_BOX_AREA_FRACTION"]
+CONTAINMENT_THRESHOLD = cfg["CONTAINMENT_THRESHOLD"]
+
+BOX_COLOR     = cfg["BOX_COLOR"]
+BOX_THICKNESS = cfg["BOX_THICKNESS"]
+LABEL_COLOR   = cfg["LABEL_COLOR"]
+FONT          = cfg["FONT"]
+FONT_SCALE    = cfg["FONT_SCALE"]
 
 # ─── MODEL LOADING ────────────────────────────────────────────────────────────
 
@@ -245,10 +249,10 @@ def detect_weeds(image: Image.Image, model, processor, prompt: str) -> tuple[lis
             **inputs,
             tokenizer=processor.tokenizer,
             use_cache=True,
-            max_new_tokens=512,
+            max_new_tokens=MAX_NEW_TOKENS,
             do_sample=False,
-            repetition_penalty=1.3,
-            no_repeat_ngram_size=8,
+            repetition_penalty=REPETITION_PENALTY,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
         )
 
     # LocateAnything remote code returns decoded text directly.
@@ -353,8 +357,8 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
         print()
 
     # Save JSON results
-    with open(RESULTS_FILE, "w") as f:
-        json.dump(all_results, f, indent=2)
+    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     # Summary
     total_weeds = sum(r["weed_count"] for r in all_results)
