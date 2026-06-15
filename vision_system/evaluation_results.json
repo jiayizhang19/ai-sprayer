@@ -1,0 +1,87 @@
+{
+  "experiment_config": {
+    "model_id": "nvidia/LocateAnything-3B",
+    "device": "cpu",
+    "dtype": "float32",
+    "prompt": "Locate all weeds in this image.",
+    "min_box_area_fraction": 0.005,
+    "containment_threshold": 0.9,
+    "conf_threshold": 0.0,
+    "max_new_tokens": 512,
+    "repetition_penalty": 1.3,
+    "no_repeat_ngram_size": 8
+  },
+  "overall": {
+    "precision": 0.8,
+    "recall": 0.631578947368421,
+    "f1": 0.7058823480103807,
+    "mean_iou": 0.7854402783036917,
+    "tp": 12,
+    "fp": 3,
+    "fn": 7,
+    "total_gt": 19,
+    "total_pred": 15
+  },
+  "per_image": [
+    {
+      "image": "capture_001_Brome_png.rf.4528194d80cc6998144b09c8d958a20c.jpg",
+      "gt_count": 3,
+      "pred_count": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "f1": 0.7999999952000001,
+      "mean_iou_matched": 0.7818358855719696
+    },
+    {
+      "image": "capture_001_Brome_png.rf.c44c6df6ad78b6aab5b1b9f5ad777438.jpg",
+      "gt_count": 3,
+      "pred_count": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "f1": 0.7999999952000001,
+      "mean_iou_matched": 0.7534488121133336
+    },
+    {
+      "image": "capture_001_Brome_png.rf.c803c3d989640e165b81a1046db6fd84.jpg",
+      "gt_count": 3,
+      "pred_count": 3,
+      "tp": 2,
+      "fp": 1,
+      "fn": 1,
+      "precision": 0.6666666666666666,
+      "recall": 0.6666666666666666,
+      "f1": 0.6666666616666668,
+      "mean_iou_matched": 0.8355259466874287
+    },
+    {
+      "image": "capture_002_Brome_png.rf.404cb3bc2adbc025d9d84ade5f47c835.jpg",
+      "gt_count": 5,
+      "pred_count": 4,
+      "tp": 2,
+      "fp": 2,
+      "fn": 3,
+      "precision": 0.5,
+      "recall": 0.4,
+      "f1": 0.4444444395061729,
+      "mean_iou_matched": 0.7645242881940977
+    },
+    {
+      "image": "capture_002_Brome_png.rf.94f9812f9f9cbb79d607c8aa1ff4c924.jpg",
+      "gt_count": 5,
+      "pred_count": 4,
+      "tp": 4,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.8,
+      "f1": 0.8888888839506174,
+      "mean_iou_matched": 0.78865336862766
+    }
+  ]
+}

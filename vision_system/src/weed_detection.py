@@ -319,6 +319,19 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
     print("-" * 60)
 
     all_results = []
+    experiment_config = {
+        "model_id": MODEL_ID,
+        "device": DEVICE,
+        "dtype": str(DTYPE).replace("torch.", ""),
+        "prompt_used": prompt,
+        "prompt": prompt,
+        "min_box_area_fraction": MIN_BOX_AREA_FRACTION,
+        "containment_threshold": CONTAINMENT_THRESHOLD,
+        "conf_threshold": CONF_THRESHOLD,
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "repetition_penalty": REPETITION_PENALTY,
+        "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
+    }
 
     for idx, img_path in enumerate(image_files):
         print(f"[{idx+1}/{len(image_files)}] Processing: {img_path.name}")
@@ -358,7 +371,10 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
 
     # Save JSON results
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+        json.dump({
+            "experiment_config": experiment_config,
+            "results": all_results,
+        }, f, indent=2, ensure_ascii=False)
 
     # Summary
     total_weeds = sum(r["weed_count"] for r in all_results)
@@ -370,6 +386,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
           f"(avg {total_time/len(image_files):.1f}s/image on {DEVICE})")
     print(f"Annotated images saved to: {output_dir}/")
     print(f"All results saved to:      {RESULTS_FILE}")
+    print(f"Experiment config saved with: prompt, min_box_area_fraction, containment_threshold")
 
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────────────────

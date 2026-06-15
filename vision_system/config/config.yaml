@@ -21,6 +21,7 @@ detection:
   # e.g. "Locate all broadleaf weeds between the crop rows."
   prompts:
     - "Locate all weeds in this image."
+    # - "Locate all the instances that match the following description: weed"
 
   supported_extensions:
     - ".jpg"
