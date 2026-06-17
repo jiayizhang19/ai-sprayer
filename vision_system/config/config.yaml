@@ -20,7 +20,8 @@ detection:
   # Try a more specific prompt if results are noisy or missing weed types,
   # e.g. "Locate all broadleaf weeds between the crop rows."
   prompts:
-    - "Locate all weeds in this image."
+    # - "Locate all chickweed in this image."
+    - "Locate all brome plants separately. Draw one bounding box per individual plant. If there is no brome present, do not detect anything."
     # - "Locate all the instances that match the following description: weed"
 
   supported_extensions:
@@ -59,7 +60,7 @@ filtering:
   # the smaller one is dropped as junk (0.0-1.0).
   # Decrease (e.g. 0.8) if overlapping junk boxes aren't removed.
   # Increase (closer to 1.0) if adjacent real weeds get merged into one.
-  containment_threshold: 0.9
+  containment_threshold: 0.8
 
 visualization:
   box_color_bgr: [0, 255, 0]    # green, OpenCV BGR order

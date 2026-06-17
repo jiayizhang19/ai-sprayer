@@ -1,15 +1,13 @@
 """
 Step 1: Zero-shot weed detection using NVIDIA LocateAnything-3B
 ---------------------------------------------------------------
-Processes a folder of images and saves annotated results.
-The detect_weeds() function is deliberately kept self-contained
-so it can be dropped into a camera loop later with zero changes.
-
-All settings are loaded from config/config.yaml — edit that file to
-change behaviour. No need to edit this script.
+Final robust version with:
+- Fixed attention implementation
+- Fixed output decoding
+- Centroid visualization
+- Improved label cleaning
 """
 
-import os
 import sys
 import json
 import re
@@ -22,16 +20,10 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoModel
 
-# This script lives in vision_system/src/. config/ lives in vision_system/.
-# Add vision_system/ to the path so `config.config_loader` can be imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from config.config_loader import load_config
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-# All values below are loaded from config/config.yaml.
-# Edit that file to change paths, prompts, thresholds, generation settings, etc.
-
 cfg = load_config()
 
 MODEL_ID   = cfg["MODEL_ID"]
@@ -44,7 +36,6 @@ RESULTS_FILE = cfg["RESULTS_FILE"]
 
 DETECTION_PROMPTS    = cfg["DETECTION_PROMPTS"]
 SUPPORTED_EXTENSIONS = cfg["SUPPORTED_EXTENSIONS"]
-CONF_THRESHOLD       = cfg["CONF_THRESHOLD"]
 
 MAX_NEW_TOKENS        = cfg["MAX_NEW_TOKENS"]
 REPETITION_PENALTY    = cfg["REPETITION_PENALTY"]
@@ -55,22 +46,17 @@ CONTAINMENT_THRESHOLD = cfg["CONTAINMENT_THRESHOLD"]
 
 BOX_COLOR     = cfg["BOX_COLOR"]
 BOX_THICKNESS = cfg["BOX_THICKNESS"]
-LABEL_COLOR   = cfg["LABEL_COLOR"]
 FONT          = cfg["FONT"]
 FONT_SCALE    = cfg["FONT_SCALE"]
 
-# ─── MODEL LOADING ────────────────────────────────────────────────────────────
 
+# ─── MODEL LOADING ────────────────────────────────────────────────────────────
 def load_model():
-    """Load LocateAnything model and processor once at startup."""
     print(f"Loading model: {MODEL_ID}")
     print(f"Device: {DEVICE} | Dtype: {DTYPE}")
-    print("This may take a few minutes on first run (downloading ~6GB)...\n")
+    print("This may take a few minutes...\n")
 
-    processor = AutoProcessor.from_pretrained(
-        MODEL_ID,
-        trust_remote_code=True
-    )
+    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 
     model = AutoModel.from_pretrained(
         MODEL_ID,
@@ -79,18 +65,18 @@ def load_model():
         attn_implementation="sdpa",
     )
 
-    # Some LocateAnything remote-code versions ignore constructor attention args.
-    for obj in [
-        model,
-        getattr(model, "language_model", None),
-        getattr(getattr(model, "language_model", None), "model", None),
-    ]:
+    # Force correct attention implementation
+    for obj in [model, getattr(model, "language_model", None),
+                getattr(getattr(model, "language_model", None), "model", None)]:
         if obj is None:
             continue
         if hasattr(obj, "_attn_implementation"):
             obj._attn_implementation = "sdpa"
-        if hasattr(obj, "config") and hasattr(obj.config, "_attn_implementation"):
-            obj.config._attn_implementation = "sdpa"
+        if hasattr(obj, "config"):
+            if hasattr(obj.config, "_attn_implementation"):
+                obj.config._attn_implementation = "sdpa"
+            if hasattr(obj.config, "attn_implementation"):
+                obj.config.attn_implementation = "sdpa"
 
     if DEVICE == "cuda":
         model = model.to(DEVICE)
@@ -100,149 +86,95 @@ def load_model():
     return model, processor
 
 
-# ─── DETECTION ───────────────────────────────────────────────────────────────
+# ─── LABEL CLEANING ───────────────────────────────────────────────────────────
+def clean_label(label: str) -> str:
+    label = label.strip().lower()
+    if not label:
+        return "weed"
+    for word in ["brome", "weed", "chickweed"]:
+        if word in label:
+            return word
+    n = len(label)
+    for unit_len in range(1, n//2 + 2):
+        unit = label[:unit_len]
+        if unit * (n // unit_len) in label:
+            if len(unit) >= 3:
+                return unit
+    return label
 
+
+# ─── NMS ─────────────────────────────────────────────────────────────────────
+def apply_nms(detections: list[dict], iou_threshold: float = 0.45) -> list[dict]:
+    if len(detections) <= 1:
+        return detections
+    boxes = np.array([[d["x1"], d["y1"], d["x2"], d["y2"]] for d in detections])
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    order = areas.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+        inds = np.where(ovr <= iou_threshold)[0]
+        order = order[inds + 1]
+    return [detections[i] for i in keep]
+
+
+# ─── FILTERING & PARSING ─────────────────────────────────────────────────────
 def filter_detections(detections: list[dict], img_w: int, img_h: int) -> list[dict]:
-    """
-    Remove junk boxes left over from generation degeneration loops.
-
-    Two passes:
-    1. Min-area filter: drop boxes smaller than MIN_BOX_AREA_FRACTION of the
-       image area (the junk boxes tend to be tiny slivers).
-    2. Containment filter: among the remaining boxes, sort largest-first and
-       drop any box that is >=CONTAINMENT_THRESHOLD contained within a box
-       already accepted (the junk boxes tend to nest inside the real ones).
-    """
     img_area = img_w * img_h
     min_area = MIN_BOX_AREA_FRACTION * img_area
-
-    # --- Pass 1: minimum area ---
-    sized = []
-    for det in detections:
-        w = max(0, det["x2"] - det["x1"])
-        h = max(0, det["y2"] - det["y1"])
-        area = w * h
-        if area >= min_area:
-            sized.append((area, det))
-
-    # --- Pass 2: containment, largest boxes first ---
-    sized.sort(key=lambda t: t[0], reverse=True)
-
+    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections 
+             if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
+    sized.sort(key=lambda x: x[0], reverse=True)
     accepted = []
-    for area, det in sized:
-        x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-
-        is_contained = False
-        for kept in accepted:
-            kx1, ky1, kx2, ky2 = kept["x1"], kept["y1"], kept["x2"], kept["y2"]
-
-            # Intersection
-            ix1, iy1 = max(x1, kx1), max(y1, ky1)
-            ix2, iy2 = min(x2, kx2), min(y2, ky2)
-            iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-            inter_area = iw * ih
-
-            if area > 0 and (inter_area / area) >= CONTAINMENT_THRESHOLD:
-                is_contained = True
-                break
-
-        if not is_contained:
+    for _, det in sized:
+        if not any(
+            (min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * 
+            (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / 
+            max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD
+            for k in accepted
+        ):
             accepted.append(det)
-
     return accepted
 
 
 def parse_boxes(response_text: str, img_w: int, img_h: int) -> list[dict]:
-    """
-    Parse bounding boxes from LocateAnything text output.
-
-    LocateAnything actually returns boxes in the format:
-        <ref>label text</ref><box><x1><y1><x2><y2></box><box><x1><y1><x2><y2></box>...
-    i.e. one <ref>...</ref> tag followed by one or more <box><a><b><c><d></box> tags,
-    each number wrapped in its own angle brackets. Coordinates are normalised
-    to a 0-1000 scale.
-
-    The model sometimes degenerates into repeating the exact same box dozens
-    of times (a known greedy-decoding repetition loop). Consecutive duplicate
-    boxes are collapsed to a single detection here.
-
-    Returns a list of dicts: {label, x1, y1, x2, y2, x1_norm, y1_norm, x2_norm, y2_norm}
-    """
     detections = []
-
-    # Match each <ref>label</ref> followed by a run of <box><a><b><c><d></box> tags
     ref_blocks = re.findall(r'<ref>(.*?)</ref>((?:<box>(?:<\d+>){4}</box>)+)', response_text, re.DOTALL)
-
     for label, raw in ref_blocks:
-        label = label.strip()
-
-        # Extract all 4 numbers per <box><x1><y1><x2><y2></box>
+        label = clean_label(label)
         raw_boxes = re.findall(r'<box><(\d+)><(\d+)><(\d+)><(\d+)></box>', raw)
-
         last_box = None
         for bx in raw_boxes:
-            x1n, y1n, x2n, y2n = [int(v) for v in bx]
-
-            # Skip consecutive exact-duplicate boxes (repetition-loop artifact)
+            x1n, y1n, x2n, y2n = map(int, bx)
             if last_box == (x1n, y1n, x2n, y2n):
                 continue
             last_box = (x1n, y1n, x2n, y2n)
-
-            # Denormalise from 0-1000 → pixel coordinates
             x1 = int(x1n / 1000 * img_w)
             y1 = int(y1n / 1000 * img_h)
             x2 = int(x2n / 1000 * img_w)
             y2 = int(y2n / 1000 * img_h)
-            detections.append({
-                "label": label,
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "x1_norm": x1n, "y1_norm": y1n, "x2_norm": x2n, "y2_norm": y2n,
-            })
-
-    return filter_detections(detections, img_w, img_h)
+            detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+    filtered = filter_detections(detections, img_w, img_h)
+    return apply_nms(filtered)
 
 
-def detect_weeds(image: Image.Image, model, processor, prompt: str) -> tuple[list[dict], str]:
-    """
-    Core detection function — takes a PIL image, returns bounding boxes.
-
-    This function is intentionally self-contained so it can be reused
-    directly inside a real-time camera loop (Step 4) without changes.
-
-    Args:
-        image:     PIL.Image (RGB)
-        model:     loaded LocateAnything model
-        processor: loaded processor
-        prompt:    natural language detection prompt
-
-    Returns:
-        detections: list of bounding box dicts
-        raw_text:   raw model response (useful for debugging)
-    """
+# ─── DETECTION ───────────────────────────────────────────────────────────────
+def detect_weeds(image: Image.Image, model, processor, prompt: str):
     img_w, img_h = image.size
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": prompt}
-            ]
-        }
-    ]
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
 
-    # Build model inputs
-    text_input = processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False
-    )
-
-    inputs = processor(
-        text=text_input,
-        images=[image],
-        return_tensors="pt"
-    ).to(DEVICE)
+    text_input = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    inputs = processor(text=text_input, images=[image], return_tensors="pt").to(DEVICE)
 
     with torch.no_grad():
         output = model.generate(
@@ -255,109 +187,78 @@ def detect_weeds(image: Image.Image, model, processor, prompt: str) -> tuple[lis
             no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
         )
 
-    # LocateAnything remote code returns decoded text directly.
+    # Robust decoding - handle both tensor and string output
     if isinstance(output, str):
         raw_text = output
     else:
-        generated = output[:, inputs["input_ids"].shape[1]:]
-        raw_text = processor.decode(generated[0], skip_special_tokens=True)
+        # Tensor case
+        generated_tokens = output[0, inputs["input_ids"].shape[1]:]
+        raw_text = processor.decode(generated_tokens, skip_special_tokens=True)
 
     detections = parse_boxes(raw_text, img_w, img_h)
     return detections, raw_text
 
 
-# ─── VISUALISATION ───────────────────────────────────────────────────────────
-
+# ─── VISUALISATION WITH CENTROID ─────────────────────────────────────────────
 def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray:
-    """Draw bounding boxes and labels on a BGR image (OpenCV format)."""
     annotated = image_bgr.copy()
-
     for i, det in enumerate(detections):
         x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
         label = f"{det['label']} #{i+1}"
 
         cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, BOX_THICKNESS)
 
-        # Label background for readability
         (tw, th), _ = cv2.getTextSize(label, FONT, FONT_SCALE, 1)
         cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), BOX_COLOR, -1)
-        cv2.putText(annotated, label, (x1 + 2, y1 - 4),
-                    FONT, FONT_SCALE, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(annotated, label, (x1 + 2, y1 - 4), FONT, FONT_SCALE, (0, 0, 0), 1)
 
-    # Summary count
-    count_text = f"Weeds detected: {len(detections)}"
-    cv2.putText(annotated, count_text, (10, 30),
-                FONT, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
+        # Centroid
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        cv2.circle(annotated, (cx, cy), 6, (0, 0, 255), -1)
+        cv2.circle(annotated, (cx, cy), 8, (0, 255, 255), 2)
 
+        coord_text = f"({cx},{cy})"
+        (twc, _), _ = cv2.getTextSize(coord_text, FONT, 0.5, 1)
+        text_y = cy + 25 if cy < annotated.shape[0] - 40 else cy - 15
+        cv2.putText(annotated, coord_text, (cx - twc//2, text_y), FONT, 0.5, (0, 0, 255), 1)
+
+    cv2.putText(annotated, f"Weeds detected: {len(detections)}", (10, 30),
+                FONT, 0.9, (0, 255, 255), 2)
     return annotated
 
 
-# ─── MAIN BATCH LOOP ─────────────────────────────────────────────────────────
-
+# ─── MAIN ────────────────────────────────────────────────────────────────────
 def process_folder(input_dir: str, output_dir: str, model, processor):
-    """
-    Process all images in input_dir.
-    Saves annotated images to output_dir and all results to detections.json.
-    """
-    input_path  = Path(input_dir)
+    input_path = Path(input_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    image_files = sorted([
-        f for f in input_path.iterdir()
-        if f.suffix.lower() in SUPPORTED_EXTENSIONS
-    ])
-
+    image_files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
     if not image_files:
-        print(f"No images found in {input_dir}")
-        print(f"Supported formats: {SUPPORTED_EXTENSIONS}")
+        print("No images found!")
         return
 
-    print(f"Found {len(image_files)} image(s) in {input_dir}\n")
-    prompt = DETECTION_PROMPTS[0]
-    print(f"Detection prompt: \"{prompt}\"\n")
-    print("-" * 60)
+    prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all brome plants separately."
+    print(f"Using prompt: \"{prompt}\"\n")
 
     all_results = []
-    experiment_config = {
-        "model_id": MODEL_ID,
-        "device": DEVICE,
-        "dtype": str(DTYPE).replace("torch.", ""),
-        "prompt_used": prompt,
-        "prompt": prompt,
-        "min_box_area_fraction": MIN_BOX_AREA_FRACTION,
-        "containment_threshold": CONTAINMENT_THRESHOLD,
-        "conf_threshold": CONF_THRESHOLD,
-        "max_new_tokens": MAX_NEW_TOKENS,
-        "repetition_penalty": REPETITION_PENALTY,
-        "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
-    }
-
     for idx, img_path in enumerate(image_files):
         print(f"[{idx+1}/{len(image_files)}] Processing: {img_path.name}")
 
-        # Load image
         pil_image = Image.open(img_path).convert("RGB")
         bgr_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-        # Run detection
         t_start = time.time()
         detections, raw_text = detect_weeds(pil_image, model, processor, prompt)
         elapsed = time.time() - t_start
 
-        print(f"  → {len(detections)} weed(s) detected  ({elapsed:.1f}s)")
-        if detections:
-            for i, d in enumerate(detections):
-                print(f"     [{i+1}] {d['label']}  box=({d['x1']},{d['y1']}) → ({d['x2']},{d['y2']})")
-        else:
-            print(f"  → Raw model output: {raw_text[:200]}")  # debug if nothing detected
+        print(f"  → {len(detections)} weed(s) detected ({elapsed:.1f}s)")
 
-        # Draw and save annotated image
         annotated = draw_detections(bgr_image, detections)
-        out_filename = output_path / f"detected_{img_path.stem}.jpg"
-        cv2.imwrite(str(out_filename), annotated)
+        out_path = output_path / f"detected_{img_path.stem}.jpg"
+        cv2.imwrite(str(out_path), annotated)
 
-        # Accumulate results
         all_results.append({
             "image": img_path.name,
             "weed_count": len(detections),
@@ -366,30 +267,13 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
             "inference_time_seconds": round(elapsed, 2),
         })
 
-        print(f"  → Saved: {out_filename.name}")
-        print()
+        print(f"  → Saved: {out_path.name}\n")
 
-    # Save JSON results
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "experiment_config": experiment_config,
-            "results": all_results,
-        }, f, indent=2, ensure_ascii=False)
+        json.dump({"results": all_results}, f, indent=2)
 
-    # Summary
-    total_weeds = sum(r["weed_count"] for r in all_results)
-    total_time  = sum(r["inference_time_seconds"] for r in all_results)
-    print("=" * 60)
-    print(f"Done! {len(image_files)} images processed.")
-    print(f"Total weeds detected: {total_weeds}")
-    print(f"Total inference time: {total_time:.1f}s  "
-          f"(avg {total_time/len(image_files):.1f}s/image on {DEVICE})")
-    print(f"Annotated images saved to: {output_dir}/")
-    print(f"All results saved to:      {RESULTS_FILE}")
-    print(f"Experiment config saved with: prompt, min_box_area_fraction, containment_threshold")
+    print("✅ Done! All images processed.")
 
-
-# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     model, processor = load_model()
