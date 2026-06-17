@@ -5,10 +5,13 @@
 # See README.md for guidance on when to adjust each parameter.
 # ============================================================================
 
+
 model:
-  model_id: "nvidia/LocateAnything-3B"
-  device: "cpu"          # "cpu" or "cuda" (set to "cuda" when GPU is available)
-  dtype: "float32"        # "float32" (CPU) or "float16" (GPU, faster)
+  model_type: "yolo"        # Options: "locateanything" or "yolo"
+  locateanything_id: "nvidia/LocateAnything-3B"   # Only used for LocateAnything
+  yolo_model: "yolov8s.pt"                        # Only used for YOLO
+  device: "cpu"
+  dtype: "float32"
 
 paths:
   input_dir: "weed_images"           # folder with your weed images

@@ -1,11 +1,6 @@
 """
-Step 1: Zero-shot weed detection using NVIDIA LocateAnything-3B
----------------------------------------------------------------
-Final robust version with:
-- Fixed attention implementation
-- Fixed output decoding
-- Centroid visualization
-- Improved label cleaning
+Modular Weed Detection Pipeline
+Supports switching between LocateAnything-3B and YOLOv8 via config only
 """
 
 import sys
@@ -18,75 +13,73 @@ import torch
 import cv2
 import numpy as np
 from PIL import Image
-from transformers import AutoProcessor, AutoModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.config_loader import load_config
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
 cfg = load_config()
 
-MODEL_ID   = cfg["MODEL_ID"]
-DEVICE     = cfg["DEVICE"]
-DTYPE      = cfg["DTYPE"]
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+MODEL_TYPE = cfg["MODEL_TYPE"]
+LOCATEANYTHING_ID = cfg["LOCATEANYTHING_ID"]
+YOLO_MODEL = cfg["YOLO_MODEL"]
 
-INPUT_DIR    = cfg["INPUT_DIR"]
-OUTPUT_DIR   = cfg["OUTPUT_DIR"]
+INPUT_DIR = cfg["INPUT_DIR"]
+OUTPUT_DIR = cfg["OUTPUT_DIR"]
 RESULTS_FILE = cfg["RESULTS_FILE"]
 
-DETECTION_PROMPTS    = cfg["DETECTION_PROMPTS"]
+DETECTION_PROMPTS = cfg["DETECTION_PROMPTS"]
 SUPPORTED_EXTENSIONS = cfg["SUPPORTED_EXTENSIONS"]
 
-MAX_NEW_TOKENS        = cfg["MAX_NEW_TOKENS"]
-REPETITION_PENALTY    = cfg["REPETITION_PENALTY"]
-NO_REPEAT_NGRAM_SIZE  = cfg["NO_REPEAT_NGRAM_SIZE"]
+MAX_NEW_TOKENS = cfg["MAX_NEW_TOKENS"]
+REPETITION_PENALTY = cfg["REPETITION_PENALTY"]
+NO_REPEAT_NGRAM_SIZE = cfg["NO_REPEAT_NGRAM_SIZE"]
 
 MIN_BOX_AREA_FRACTION = cfg["MIN_BOX_AREA_FRACTION"]
 CONTAINMENT_THRESHOLD = cfg["CONTAINMENT_THRESHOLD"]
 
-BOX_COLOR     = cfg["BOX_COLOR"]
+BOX_COLOR = cfg["BOX_COLOR"]
 BOX_THICKNESS = cfg["BOX_THICKNESS"]
-FONT          = cfg["FONT"]
-FONT_SCALE    = cfg["FONT_SCALE"]
+FONT = cfg["FONT"]
+FONT_SCALE = cfg["FONT_SCALE"]
 
 
-# ─── MODEL LOADING ────────────────────────────────────────────────────────────
+# ─── MODEL LOADING ───────────────────────────────────────────────────────────
 def load_model():
-    print(f"Loading model: {MODEL_ID}")
-    print(f"Device: {DEVICE} | Dtype: {DTYPE}")
-    print("This may take a few minutes...\n")
+    print(f"Loading {MODEL_TYPE.upper()} model...")
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+    if MODEL_TYPE == "yolo":
+        from ultralytics import YOLO
+        model = YOLO(YOLO_MODEL)
+        print(f"✅ YOLOv8 loaded: {YOLO_MODEL}")
+        return model, None
 
-    model = AutoModel.from_pretrained(
-        MODEL_ID,
-        trust_remote_code=True,
-        torch_dtype=DTYPE,
-        attn_implementation="sdpa",
-    )
+    else:  # locateanything
+        from transformers import AutoProcessor, AutoModel
+        processor = AutoProcessor.from_pretrained(LOCATEANYTHING_ID, trust_remote_code=True)
+        model = AutoModel.from_pretrained(
+            LOCATEANYTHING_ID,
+            trust_remote_code=True,
+            torch_dtype=cfg["DTYPE"],
+            attn_implementation="sdpa",
+        )
 
-    # Force correct attention implementation
-    for obj in [model, getattr(model, "language_model", None),
-                getattr(getattr(model, "language_model", None), "model", None)]:
-        if obj is None:
-            continue
-        if hasattr(obj, "_attn_implementation"):
-            obj._attn_implementation = "sdpa"
-        if hasattr(obj, "config"):
-            if hasattr(obj.config, "_attn_implementation"):
+        # Force SDPA attention
+        for obj in [model, getattr(model, "language_model", None),
+                    getattr(getattr(model, "language_model", None), "model", None)]:
+            if obj and hasattr(obj, "_attn_implementation"):
+                obj._attn_implementation = "sdpa"
+            if obj and hasattr(obj, "config") and hasattr(obj.config, "_attn_implementation"):
                 obj.config._attn_implementation = "sdpa"
-            if hasattr(obj.config, "attn_implementation"):
-                obj.config.attn_implementation = "sdpa"
 
-    if DEVICE == "cuda":
-        model = model.to(DEVICE)
-    model.eval()
-
-    print("Model loaded successfully.\n")
-    return model, processor
+        if cfg["DEVICE"] == "cuda":
+            model = model.to("cuda")
+        model.eval()
+        print("✅ LocateAnything-3B loaded successfully.")
+        return model, processor
 
 
-# ─── LABEL CLEANING ───────────────────────────────────────────────────────────
+# ─── SHARED HELPERS ─────────────────────────────────────────────────────────
 def clean_label(label: str) -> str:
     label = label.strip().lower()
     if not label:
@@ -98,113 +91,15 @@ def clean_label(label: str) -> str:
     for unit_len in range(1, n//2 + 2):
         unit = label[:unit_len]
         if unit * (n // unit_len) in label:
-            if len(unit) >= 3:
-                return unit
+            return unit if len(unit) >= 3 else label
     return label
 
 
-# ─── NMS ─────────────────────────────────────────────────────────────────────
-def apply_nms(detections: list[dict], iou_threshold: float = 0.45) -> list[dict]:
-    if len(detections) <= 1:
-        return detections
-    boxes = np.array([[d["x1"], d["y1"], d["x2"], d["y2"]] for d in detections])
-    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-    order = areas.argsort()[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
-        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
-        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
-        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
-        w = np.maximum(0.0, xx2 - xx1)
-        h = np.maximum(0.0, yy2 - yy1)
-        inter = w * h
-        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        inds = np.where(ovr <= iou_threshold)[0]
-        order = order[inds + 1]
-    return [detections[i] for i in keep]
-
-
-# ─── FILTERING & PARSING ─────────────────────────────────────────────────────
-def filter_detections(detections: list[dict], img_w: int, img_h: int) -> list[dict]:
-    img_area = img_w * img_h
-    min_area = MIN_BOX_AREA_FRACTION * img_area
-    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections 
-             if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
-    sized.sort(key=lambda x: x[0], reverse=True)
-    accepted = []
-    for _, det in sized:
-        if not any(
-            (min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * 
-            (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / 
-            max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD
-            for k in accepted
-        ):
-            accepted.append(det)
-    return accepted
-
-
-def parse_boxes(response_text: str, img_w: int, img_h: int) -> list[dict]:
-    detections = []
-    ref_blocks = re.findall(r'<ref>(.*?)</ref>((?:<box>(?:<\d+>){4}</box>)+)', response_text, re.DOTALL)
-    for label, raw in ref_blocks:
-        label = clean_label(label)
-        raw_boxes = re.findall(r'<box><(\d+)><(\d+)><(\d+)><(\d+)></box>', raw)
-        last_box = None
-        for bx in raw_boxes:
-            x1n, y1n, x2n, y2n = map(int, bx)
-            if last_box == (x1n, y1n, x2n, y2n):
-                continue
-            last_box = (x1n, y1n, x2n, y2n)
-            x1 = int(x1n / 1000 * img_w)
-            y1 = int(y1n / 1000 * img_h)
-            x2 = int(x2n / 1000 * img_w)
-            y2 = int(y2n / 1000 * img_h)
-            detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-    filtered = filter_detections(detections, img_w, img_h)
-    return apply_nms(filtered)
-
-
-# ─── DETECTION ───────────────────────────────────────────────────────────────
-def detect_weeds(image: Image.Image, model, processor, prompt: str):
-    img_w, img_h = image.size
-
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-
-    text_input = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    inputs = processor(text=text_input, images=[image], return_tensors="pt").to(DEVICE)
-
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            tokenizer=processor.tokenizer,
-            use_cache=True,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            repetition_penalty=REPETITION_PENALTY,
-            no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
-        )
-
-    # Robust decoding - handle both tensor and string output
-    if isinstance(output, str):
-        raw_text = output
-    else:
-        # Tensor case
-        generated_tokens = output[0, inputs["input_ids"].shape[1]:]
-        raw_text = processor.decode(generated_tokens, skip_special_tokens=True)
-
-    detections = parse_boxes(raw_text, img_w, img_h)
-    return detections, raw_text
-
-
-# ─── VISUALISATION WITH CENTROID ─────────────────────────────────────────────
 def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray:
     annotated = image_bgr.copy()
     for i, det in enumerate(detections):
         x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-        label = f"{det['label']} #{i+1}"
+        label = f"{det.get('label', 'weed')} #{i+1}"
 
         cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, BOX_THICKNESS)
 
@@ -228,19 +123,113 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
     return annotated
 
 
+# ─── YOLO DETECTION ─────────────────────────────────────────────────────────
+def detect_with_yolo(image: Image.Image, model):
+    results = model(image, conf=0.3, verbose=False)[0]
+    detections = []
+    for box in results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        conf = float(box.conf[0])
+        cls = int(box.cls[0])
+        label = results.names[cls]
+        detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": conf})
+    return detections, str(results)
+
+
+# ─── LOCATEANYTHING HELPERS ─────────────────────────────────────────────────
+def filter_detections(detections, img_w, img_h):
+    img_area = img_w * img_h
+    min_area = MIN_BOX_AREA_FRACTION * img_area
+    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
+    sized.sort(key=lambda x: x[0], reverse=True)
+    accepted = []
+    for _, det in sized:
+        if not any((min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD for k in accepted):
+            accepted.append(det)
+    return accepted
+
+
+def apply_nms(detections, iou_threshold=0.45):
+    if len(detections) <= 1:
+        return detections
+    boxes = np.array([[d["x1"], d["y1"], d["x2"], d["y2"]] for d in detections])
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    order = areas.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
+        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
+        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
+        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+        inds = np.where(ovr <= iou_threshold)[0]
+        order = order[inds + 1]
+    return [detections[i] for i in keep]
+
+
+def parse_boxes(response_text: str, img_w: int, img_h: int):
+    detections = []
+    ref_blocks = re.findall(r'<ref>(.*?)</ref>((?:<box>(?:<\d+>){4}</box>)+)', response_text, re.DOTALL)
+    for label, raw in ref_blocks:
+        label = clean_label(label)
+        raw_boxes = re.findall(r'<box><(\d+)><(\d+)><(\d+)><(\d+)></box>', raw)
+        last_box = None
+        for bx in raw_boxes:
+            x1n, y1n, x2n, y2n = map(int, bx)
+            if last_box == (x1n, y1n, x2n, y2n):
+                continue
+            last_box = (x1n, y1n, x2n, y2n)
+            x1 = int(x1n / 1000 * img_w)
+            y1 = int(y1n / 1000 * img_h)
+            x2 = int(x2n / 1000 * img_w)
+            y2 = int(y2n / 1000 * img_h)
+            detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+    filtered = filter_detections(detections, img_w, img_h)
+    return apply_nms(filtered)
+
+
+def detect_with_locateanything(image: Image.Image, model, processor, prompt: str):
+    img_w, img_h = image.size
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+
+    text_input = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    inputs = processor(text=text_input, images=[image], return_tensors="pt").to(cfg["DEVICE"])
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            tokenizer=processor.tokenizer,
+            use_cache=True,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            repetition_penalty=REPETITION_PENALTY,
+            no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+        )
+
+    if isinstance(output, str):
+        raw_text = output
+    else:
+        raw_text = processor.decode(output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+
+    detections = parse_boxes(raw_text, img_w, img_h)
+    return detections, raw_text
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
-def process_folder(input_dir: str, output_dir: str, model, processor):
+def process_folder(input_dir: str, output_dir: str, model, processor=None):
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     image_files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
-    if not image_files:
-        print("No images found!")
-        return
-
     prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all brome plants separately."
-    print(f"Using prompt: \"{prompt}\"\n")
+
+    print(f"Model Type: {MODEL_TYPE} | Prompt: \"{prompt}\"\n")
 
     all_results = []
     for idx, img_path in enumerate(image_files):
@@ -250,7 +239,12 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
         bgr_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
         t_start = time.time()
-        detections, raw_text = detect_weeds(pil_image, model, processor, prompt)
+
+        if MODEL_TYPE == "yolo":
+            detections, raw_text = detect_with_yolo(pil_image, model)
+        else:
+            detections, raw_text = detect_with_locateanything(pil_image, model, processor, prompt)
+
         elapsed = time.time() - t_start
 
         print(f"  → {len(detections)} weed(s) detected ({elapsed:.1f}s)")
@@ -261,18 +255,19 @@ def process_folder(input_dir: str, output_dir: str, model, processor):
 
         all_results.append({
             "image": img_path.name,
+            "model_type": MODEL_TYPE,
             "weed_count": len(detections),
             "detections": detections,
-            "raw_model_output": raw_text,
+            "raw_output": raw_text[:500],
             "inference_time_seconds": round(elapsed, 2),
         })
 
         print(f"  → Saved: {out_path.name}\n")
 
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"results": all_results}, f, indent=2)
+        json.dump({"config": {"model_type": MODEL_TYPE}, "results": all_results}, f, indent=2)
 
-    print("✅ Done! All images processed.")
+    print("✅ Pipeline completed successfully!")
 
 
 if __name__ == "__main__":
