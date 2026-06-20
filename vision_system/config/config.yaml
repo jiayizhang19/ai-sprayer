@@ -7,9 +7,9 @@
 
 
 model:
-  model_type: "yolo"        # Options: "locateanything" or "yolo"
+  model_type: "locateanything"        # Options: "locateanything" or "yolo"
   locateanything_id: "nvidia/LocateAnything-3B"   # Only used for LocateAnything
-  yolo_model: "yolov8s.pt"                        # Only used for YOLO
+  yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/oppd_weeds_yolov8n/weights/best.pt'  # Only used for YOLO
   device: "cpu"
   dtype: "float32"
 
@@ -41,7 +41,7 @@ detection:
 generation:
   # Maximum length of the model's response per image.
   # Increase if many weeds per image cause output to be cut off.
-  max_new_tokens: 512
+  max_new_tokens: 256
 
   # How strongly the model is discouraged from repeating recent tokens.
   # Increase (e.g. 1.5) if it still loops/repeats boxes.

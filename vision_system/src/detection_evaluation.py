@@ -1,21 +1,13 @@
 """
-Evaluation Script: LocateAnything vs Ground Truth
+Evaluation Script: Model vs Ground Truth
 -------------------------------------------------
-Computes standard object detection metrics:
-- Precision, Recall, F1-score
-- mIoU (mean Intersection over Union)
-- Average IoU of matched detections
-- TP/FP/FN counts
-- Option to use different IoU thresholds
-
-Run from vision_system/:
-    python evaluate_detection.py
+Checks for both yolo_detections.json and locateanything_detections.json
+Generates corresponding evaluation reports for each.
 """
 
 import json
 from pathlib import Path
 import sys
-from collections import defaultdict
 
 import numpy as np
 from PIL import Image
@@ -27,23 +19,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.config_loader import load_config
 
 GT_LABELS_DIR = PROJECT_ROOT / "labels"
-DETECTIONS_JSON = PROJECT_ROOT / "detections.json"   # from weed_detection_step1.py
+RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
 
-IOU_THRESHOLD = 0.5          # Standard threshold for matching
-MIN_CONF = 0.0               # Not used currently (model has no confidence)
+IOU_THRESHOLD = 0.5
 
 print(f"Using IoU threshold = {IOU_THRESHOLD}\n")
 
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
-
+# ─── HELPERS (unchanged) ─────────────────────────────────────────────────────
 def load_ground_truth(image_name: str) -> list[dict]:
-    """Load YOLO .txt ground truth for an image."""
     stem = Path(image_name).stem.replace("detected_", "").replace("gt_", "")
     label_path = GT_LABELS_DIR / f"{stem}.txt"
     
     if not label_path.exists():
-        # Try with original capture name variations
         for p in GT_LABELS_DIR.glob("*.txt"):
             if stem in p.stem or p.stem in stem:
                 label_path = p
@@ -70,8 +58,7 @@ def load_ground_truth(image_name: str) -> list[dict]:
     return boxes
 
 
-def yolo_to_pixel(box: dict, img_w: int, img_h: int) -> tuple[int, int, int, int]:
-    """Convert normalized YOLO box to pixel (x1, y1, x2, y2)."""
+def yolo_to_pixel(box: dict, img_w: int, img_h: int) -> tuple:
     cx = box["x_center"] * img_w
     cy = box["y_center"] * img_h
     w = box["width"] * img_w
@@ -83,32 +70,24 @@ def yolo_to_pixel(box: dict, img_w: int, img_h: int) -> tuple[int, int, int, int
     return max(0, x1), max(0, y1), min(img_w, x2), min(img_h, y2)
 
 
-def compute_iou(box1: tuple, box2: tuple) -> float:
-    """Compute IoU between two boxes (x1,y1,x2,y2)."""
+def compute_iou(box1, box2):
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
     x2 = min(box1[2], box2[2])
     y2 = min(box1[3], box2[3])
-
     if x2 < x1 or y2 < y1:
         return 0.0
-
-    inter_area = (x2 - x1) * (y2 - y1)
+    inter = (x2 - x1) * (y2 - y1)
     area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
     area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-
     if area1 == 0 or area2 == 0:
         return 0.0
-
-    union_area = area1 + area2 - inter_area
-    return inter_area / union_area
+    return inter / (area1 + area2 - inter)
 
 
-def match_detections(gt_boxes: list, pred_boxes: list, iou_thresh: float = 0.5):
-    """Greedy matching of predictions to ground truth."""
+def match_detections(gt_boxes, pred_boxes, iou_thresh=0.5):
     gt_matched = [False] * len(gt_boxes)
     matches = []
-
     for p in pred_boxes:
         best_iou = 0.0
         best_idx = -1
@@ -119,175 +98,127 @@ def match_detections(gt_boxes: list, pred_boxes: list, iou_thresh: float = 0.5):
             if iou > best_iou:
                 best_iou = iou
                 best_idx = i
-
         if best_iou >= iou_thresh:
             gt_matched[best_idx] = True
-            matches.append((best_iou, True))  # TP
+            matches.append((best_iou, True))
         else:
-            matches.append((0.0, False))      # FP
+            matches.append((0.0, False))
 
     tp = sum(1 for _, is_tp in matches if is_tp)
     fp = len(pred_boxes) - tp
     fn = len(gt_boxes) - tp
-
     ious = [iou for iou, _ in matches if iou > 0]
 
     return {
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
+        "tp": tp, "fp": fp, "fn": fn,
         "matched_ious": ious,
         "precision": tp / (tp + fp) if (tp + fp) > 0 else 0.0,
         "recall": tp / (tp + fn) if (tp + fn) > 0 else 0.0,
     }
 
 
-def normalize_detection_payload(payload):
-    """Support both legacy list-only detections.json and the new metadata wrapper."""
-    if isinstance(payload, dict):
-        return payload.get("experiment_config", {}), payload.get("results", [])
-
-    return {}, payload
-
-
-def build_experiment_config(raw_config: dict | None) -> dict:
-    """Build a serializable experiment config for reports."""
+def build_experiment_config(raw_config: dict | None, model_type: str) -> dict:
     if not raw_config:
-        return {}
+        return {"model_type": model_type}
 
-    return {
-        "model_id": raw_config.get("MODEL_ID"),
-        "device": raw_config.get("DEVICE"),
-        "dtype": str(raw_config.get("DTYPE")).replace("torch.", ""),
-        "prompt_used": raw_config.get("DETECTION_PROMPTS", [None])[0],
-        "prompt": raw_config.get("DETECTION_PROMPTS", [None])[0],
-        "min_box_area_fraction": raw_config.get("MIN_BOX_AREA_FRACTION"),
-        "containment_threshold": raw_config.get("CONTAINMENT_THRESHOLD"),
-        "conf_threshold": raw_config.get("CONF_THRESHOLD"),
-        "max_new_tokens": raw_config.get("MAX_NEW_TOKENS"),
-        "repetition_penalty": raw_config.get("REPETITION_PENALTY"),
-        "no_repeat_ngram_size": raw_config.get("NO_REPEAT_NGRAM_SIZE"),
+    config = {
+        "model_type": model_type,
+        "device": raw_config.get("device", "cpu"),
+        "dtype": str(raw_config.get("dtype", "float32")).replace("torch.", ""),
     }
 
-
-def build_markdown_report(total_gt: int, total_pred: int, total_tp: int, total_fp: int,
-                          total_fn: int, overall_precision: float, overall_recall: float,
-                          overall_f1: float, mean_iou: float, all_ious: list[float],
-                          per_image_metrics: list[dict], experiment_config: dict) -> str:
-    """Build a markdown evaluation report that mirrors the terminal summary."""
-    lines = [
-        "# LocateAnything vs Ground Truth Evaluation",
-        "",
-        "## Experiment Config",
-        "",
-    ]
-
-    if experiment_config:
-        lines.extend([
-            f"- Model ID: {experiment_config.get('model_id', 'n/a')}",
-            f"- Device: {experiment_config.get('device', 'n/a')}",
-            f"- Dtype: {experiment_config.get('dtype', 'n/a')}",
-            f"- Prompt used: {experiment_config.get('prompt_used', experiment_config.get('prompt', 'n/a'))}",
-            f"- min_box_area_fraction: {experiment_config.get('min_box_area_fraction', 'n/a')}",
-            f"- containment_threshold: {experiment_config.get('containment_threshold', 'n/a')}",
-            f"- conf_threshold: {experiment_config.get('conf_threshold', 'n/a')}",
-            f"- max_new_tokens: {experiment_config.get('max_new_tokens', 'n/a')}",
-            f"- repetition_penalty: {experiment_config.get('repetition_penalty', 'n/a')}",
-            f"- no_repeat_ngram_size: {experiment_config.get('no_repeat_ngram_size', 'n/a')}",
-            "",
-        ])
+    if model_type == "locateanything":
+        config.update({
+            "prompt": raw_config.get("prompt") or raw_config.get("prompt_used"),
+            "min_box_area_fraction": raw_config.get("min_box_area_fraction"),
+            "containment_threshold": raw_config.get("containment_threshold"),
+            "max_new_tokens": raw_config.get("max_new_tokens"),
+            "repetition_penalty": raw_config.get("repetition_penalty"),
+            "no_repeat_ngram_size": raw_config.get("no_repeat_ngram_size"),
+        })
     else:
-        lines.extend([
-            "- No experiment metadata was found in detections.json.",
-            "",
-        ])
+        config["conf_threshold"] = raw_config.get("conf_threshold", 0.25)
 
-    lines.extend([
-        f"- IoU threshold: {IOU_THRESHOLD}",
-        f"- Total ground truth boxes: {total_gt}",
-        f"- Total predictions: {total_pred}",
-        f"- True positives (TP): {total_tp}",
-        f"- False positives (FP): {total_fp}",
-        f"- False negatives (FN): {total_fn}",
-        f"- Precision: {overall_precision:.4f}",
-        f"- Recall: {overall_recall:.4f}",
-        f"- F1 score: {overall_f1:.4f}",
-        f"- Mean IoU (matched): {mean_iou:.4f}",
-        f"- Total matched boxes: {len(all_ious)}",
-        "",
-        "## Per-image results",
-        "",
-        "| Image | GT | Pred | TP | FP | FN | Precision | Recall | F1 | Mean IoU |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ])
+    return config
 
-    for metrics in per_image_metrics:
-        lines.append(
-            f"| {metrics['image']} | {metrics['gt_count']} | {metrics['pred_count']} | "
-            f"{metrics['tp']} | {metrics['fp']} | {metrics['fn']} | "
-            f"{metrics['precision']:.4f} | {metrics['recall']:.4f} | {metrics['f1']:.4f} | "
-            f"{metrics['mean_iou_matched']:.4f} |"
-        )
 
-    lines.extend([
-        "",
-        "## Notes",
-        "- Ground truth boxes are loaded from YOLO `.txt` files in `labels/`.",
-        "- Predictions are loaded from `detections.json` produced by the detection script.",
-        "- IoU matching uses a greedy one-to-one assignment at the threshold above.",
-    ])
+def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
+                          overall_precision, overall_recall, overall_f1, mean_iou,
+                          per_image_metrics, experiment_config, model_type):
+    model_name = "YOLOv8" if model_type == "yolo" else "LocateAnything-3B"
+    
+    md = f"""# {model_name} Evaluation Report
 
-    return "\n".join(lines)
+**Model Type:** {model_type}  
+**IoU Threshold:** {IOU_THRESHOLD}
+
+## Experiment Configuration
+"""
+
+    md += f"- Model Type: **{model_type}**\n"
+    md += f"- Device: {experiment_config.get('device')}\n"
+    md += f"- Dtype: {experiment_config.get('dtype')}\n"
+
+    if model_type == "locateanything":
+        md += f"- Prompt: \"{experiment_config.get('prompt', 'N/A')}\"\n"
+        md += f"- min_box_area_fraction: {experiment_config.get('min_box_area_fraction')}\n"
+        md += f"- containment_threshold: {experiment_config.get('containment_threshold')}\n"
+        md += f"- max_new_tokens: {experiment_config.get('max_new_tokens')}\n"
+        md += f"- repetition_penalty: {experiment_config.get('repetition_penalty')}\n"
+
+    md += f"""
+## Overall Results
+
+**Total Ground Truth boxes:** {total_gt}  
+**Total Predictions:** {total_pred}
+
+| Metric              | Value    |
+|---------------------|----------|
+| True Positives (TP) | {total_tp} |
+| False Positives (FP)| {total_fp} |
+| False Negatives (FN)| {total_fn} |
+| **Precision**       | **{overall_precision:.4f}** |
+| **Recall**          | **{overall_recall:.4f}** |
+| **F1 Score**        | **{overall_f1:.4f}** |
+| **Mean IoU**        | **{mean_iou:.4f}** |
+
+## Per-Image Results
+
+| Image | GT | Pred | TP | FP | FN | F1 Score |
+|-------|----|------|----|----|----|----------|
+"""
+
+    for r in per_image_metrics:
+        md += f"| {r['image'][:60]}... | {r['gt_count']} | {r['pred_count']} | {r['tp']} | {r['fp']} | {r['fn']} | {r['f1']:.3f} |\n"
+
+    md += "\n---\n*Report generated by detection_evaluation.py*\n"
+    return md
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
+def evaluate_model(detections_file: Path):
+    model_type = "yolo" if "yolo" in detections_file.name else "locateanything"
+    
+    print(f"Evaluating {model_type.upper()} from: {detections_file.name}")
 
-def main():
-    if not DETECTIONS_JSON.exists():
-        print(f"❌ Detections file not found: {DETECTIONS_JSON}")
-        print("Please run weed_detection_step1.py first.")
-        sys.exit(1)
+    with open(detections_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
 
-    with open(DETECTIONS_JSON, "r", encoding="utf-8") as f:
-        detection_payload = json.load(f)
+    raw_config = payload.get("config", {})
+    all_results = payload.get("results", [])
 
-    raw_experiment_config, all_results = normalize_detection_payload(detection_payload)
-    if not raw_experiment_config:
-        raw_experiment_config = build_experiment_config(load_config())
-    else:
-        raw_experiment_config = {
-            "model_id": raw_experiment_config.get("model_id"),
-            "device": raw_experiment_config.get("device"),
-            "dtype": raw_experiment_config.get("dtype"),
-            "prompt": raw_experiment_config.get("prompt"),
-            "min_box_area_fraction": raw_experiment_config.get("min_box_area_fraction"),
-            "containment_threshold": raw_experiment_config.get("containment_threshold"),
-            "conf_threshold": raw_experiment_config.get("conf_threshold"),
-            "max_new_tokens": raw_experiment_config.get("max_new_tokens"),
-            "repetition_penalty": raw_experiment_config.get("repetition_penalty"),
-            "no_repeat_ngram_size": raw_experiment_config.get("no_repeat_ngram_size"),
-        }
+    experiment_config = build_experiment_config(raw_config, model_type)
 
     total_tp = total_fp = total_fn = 0
     all_ious = []
     per_image_metrics = []
 
-    print("=" * 80)
-    print("Evaluating LocateAnything-3B vs Ground Truth")
-    print("=" * 80)
-    if raw_experiment_config:
-        print(f"Prompt used              : {raw_experiment_config.get('prompt_used', raw_experiment_config.get('prompt', 'n/a'))}")
-        print(f"Min box area fraction    : {raw_experiment_config.get('min_box_area_fraction', 'n/a')}")
-        print(f"Containment threshold    : {raw_experiment_config.get('containment_threshold', 'n/a')}")
-
     for res in all_results:
         img_name = res["image"]
         pred_dets = res.get("detections", [])
 
-        # Get image dimensions
         image_path = PROJECT_ROOT / "weed_images" / img_name
         if not image_path.exists():
-            # Try to find original image
             for ext in [".jpg", ".png", ".jpeg"]:
                 candidate = PROJECT_ROOT / "weed_images" / f"{Path(img_name).stem}{ext}"
                 if candidate.exists():
@@ -295,81 +226,55 @@ def main():
                     break
 
         if image_path.exists():
-            pil_img = Image.open(image_path)
-            img_w, img_h = pil_img.size
+            img_w, img_h = Image.open(image_path).size
         else:
-            print(f"⚠️  Could not find image for {img_name}, skipping dimensions")
             continue
 
-        # Load GT
-        gt_norm_boxes = load_ground_truth(img_name)
-        gt_pixel_boxes = [yolo_to_pixel(b, img_w, img_h) for b in gt_norm_boxes]
+        gt_norm = load_ground_truth(img_name)
+        gt_pixel = [yolo_to_pixel(b, img_w, img_h) for b in gt_norm]
+        pred_pixel = [(d["x1"], d["y1"], d["x2"], d["y2"]) for d in pred_dets]
 
-        # Convert predictions to pixel boxes
-        pred_pixel_boxes = []
-        for d in pred_dets:
-            pred_pixel_boxes.append((d["x1"], d["y1"], d["x2"], d["y2"]))
-
-        # Match
-        metrics = match_detections(gt_pixel_boxes, pred_pixel_boxes, IOU_THRESHOLD)
+        metrics = match_detections(gt_pixel, pred_pixel, IOU_THRESHOLD)
 
         total_tp += metrics["tp"]
         total_fp += metrics["fp"]
         total_fn += metrics["fn"]
         all_ious.extend(metrics["matched_ious"])
 
-        image_f1 = 2 * metrics["precision"] * metrics["recall"] / (metrics["precision"] + metrics["recall"] + 1e-8)
+        f1 = 2 * metrics["precision"] * metrics["recall"] / (metrics["precision"] + metrics["recall"] + 1e-8)
 
         per_image_metrics.append({
             "image": img_name,
-            "gt_count": len(gt_pixel_boxes),
-            "pred_count": len(pred_pixel_boxes),
+            "gt_count": len(gt_pixel),
+            "pred_count": len(pred_pixel),
             "tp": metrics["tp"],
             "fp": metrics["fp"],
             "fn": metrics["fn"],
             "precision": metrics["precision"],
             "recall": metrics["recall"],
-            "f1": image_f1,
+            "f1": f1,
             "mean_iou_matched": np.mean(metrics["matched_ious"]) if metrics["matched_ious"] else 0.0
         })
 
-        print(f"{img_name:40}  GT: {len(gt_pixel_boxes):2d} | Pred: {len(pred_pixel_boxes):2d} | "
-              f"TP: {metrics['tp']:2d} FP: {metrics['fp']:2d} FN: {metrics['fn']:2d} | "
-              f"F1: {image_f1:.3f}")
-
-    # ─── Overall Metrics ─────────────────────────────────────────────────────
+    # Overall metrics
     total_gt = total_tp + total_fn
     total_pred = total_tp + total_fp
-
-    overall_precision = total_tp / total_pred if total_pred > 0 else 0.0
-    overall_recall = total_tp / total_gt if total_gt > 0 else 0.0
-    overall_f1 = 2 * overall_precision * overall_recall / (overall_precision + overall_recall + 1e-8)
+    precision = total_tp / total_pred if total_pred > 0 else 0.0
+    recall = total_tp / total_gt if total_gt > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
     mean_iou = np.mean(all_ious) if all_ious else 0.0
 
-    print("\n" + "=" * 80)
-    print("OVERALL RESULTS")
-    print("=" * 80)
-    print(f"Total Ground Truth boxes : {total_gt}")
-    print(f"Total Predictions        : {total_pred}")
-    print(f"True Positives (TP)      : {total_tp}")
-    print(f"False Positives (FP)     : {total_fp}")
-    print(f"False Negatives (FN)     : {total_fn}")
-    print("-" * 60)
-    print(f"Precision                : {overall_precision:.4f}")
-    print(f"Recall                   : {overall_recall:.4f}")
-    print(f"F1 Score                 : {overall_f1:.4f}")
-    print(f"Mean IoU (matched)       : {mean_iou:.4f}")
-    print(f"Total matched boxes      : {len(all_ious)}")
+    base_name = "yolo" if model_type == "yolo" else "locateanything"
+    json_file = RESULTS_ROOT / f"{base_name}_evaluation_results.json"
+    md_file = RESULTS_ROOT / f"{base_name}_evaluation_results.md"
 
-    # Save detailed results
-    output_file = PROJECT_ROOT / "evaluation_results.json"
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(json_file, "w", encoding="utf-8") as f:
         json.dump({
-            "experiment_config": raw_experiment_config,
+            "experiment_config": experiment_config,
             "overall": {
-                "precision": overall_precision,
-                "recall": overall_recall,
-                "f1": overall_f1,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
                 "mean_iou": mean_iou,
                 "tp": total_tp,
                 "fp": total_fp,
@@ -380,26 +285,38 @@ def main():
             "per_image": per_image_metrics
         }, f, indent=2)
 
-    report_file = PROJECT_ROOT / "evaluation_results.md"
     report_text = build_markdown_report(
-        total_gt,
-        total_pred,
-        total_tp,
-        total_fp,
-        total_fn,
-        overall_precision,
-        overall_recall,
-        overall_f1,
-        mean_iou,
-        all_ious,
-        per_image_metrics,
-        raw_experiment_config,
+        total_gt, total_pred, total_tp, total_fp, total_fn,
+        precision, recall, f1, mean_iou, per_image_metrics, experiment_config, model_type
     )
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(report_text + "\n")
 
-    print(f"\nDetailed results saved to: {output_file.name}")
-    print(f"Markdown report saved to:   {report_file.name}")
+    with open(md_file, "w", encoding="utf-8") as f:
+        f.write(report_text)
+
+    print(f"   → JSON: {json_file.name}")
+    print(f"   → MD:   {md_file.name}")
+
+
+# ─── MAIN ────────────────────────────────────────────────────────────────────
+def main():
+    print("=" * 80)
+    print("Starting Evaluation for All Available Models")
+    print("=" * 80)
+
+    evaluated = False
+
+    for file_name in ["yolo_detections.json", "locateanything_detections.json"]:
+        detections_file = RESULTS_ROOT / file_name
+        if detections_file.exists():
+            evaluate_model(detections_file)
+            evaluated = True
+
+    if not evaluated:
+        print(f"❌ No detections files found in {RESULTS_ROOT}")
+        print("Please run weed_detection.py first.")
+        sys.exit(1)
+
+    print("\n✅ All available evaluations completed!")
 
 
 if __name__ == "__main__":

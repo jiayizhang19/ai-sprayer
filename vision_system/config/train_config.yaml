@@ -1,0 +1,58 @@
+# ============================================================================
+# YOLO Training — Configuration
+# ============================================================================
+# Edit values here to change training behaviour. No need to touch train_yolo.py.
+# ============================================================================
+
+dataset:
+  # Path to the dataset descriptor (class names + train/val/test image paths)
+  data_yaml: "config/data.yaml"
+
+model:
+  # Base checkpoint to fine-tune from. Using pretrained COCO weights gives
+  # the model a head start (edges, shapes, textures) vs. training from
+  # scratch, even though none of the COCO classes are weeds.
+  base_weights: "yolov8n.pt"
+
+  # Where the final best.pt and training run artifacts are saved.
+  project_dir: "runs/train"
+  run_name: "oppd_weeds_yolov8n"
+
+training:
+  epochs: 10
+  image_size: 640
+  batch_size: 4          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
+  device: "cpu"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
+  optimizer: "AdamW"      # use "auto" to let Ultralytics choose, but lr0/momentum will be ignored
+  lr0: 0.0002             # initial learning rate used when optimizer is not "auto"
+  momentum: 0.9           # optimizer momentum used when supported
+
+  # Stops training early if validation performance stops improving for this
+  # many epochs, to save time and avoid overfitting.
+  patience: 20
+
+  # Number of dataloader worker processes. Set to 0 on Windows if you hit
+  # multiprocessing errors.
+  workers: 4
+
+  # Resume training from the last checkpoint of run_name if it exists.
+  resume: false
+
+augmentation:
+  # Light augmentation is usually enough for field imagery; heavy
+  # augmentation can help with limited data but may distort plant shape
+  # cues the model needs to tell species apart.
+  hsv_h: 0.015    # hue
+  hsv_s: 0.7      # saturation
+  hsv_v: 0.4      # brightness
+  degrees: 10.0   # rotation
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5     # horizontal flip probability
+  flipud: 0.0     # vertical flip probability (usually 0 for ground-view crops)
+  mosaic: 1.0     # mosaic augmentation probability
+
+validation:
+  # IoU threshold used when computing validation metrics during training.
+  iou_threshold: 0.5
+  conf_threshold: 0.25

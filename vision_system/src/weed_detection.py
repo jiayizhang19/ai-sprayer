@@ -1,6 +1,6 @@
 """
 Modular Weed Detection Pipeline
-Supports switching between LocateAnything-3B and YOLOv8 via config only
+All outputs saved under yolo_vs_locateanything/ folder
 """
 
 import sys
@@ -20,16 +20,21 @@ from config.config_loader import load_config
 cfg = load_config()
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
+RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+
 MODEL_TYPE = cfg["MODEL_TYPE"]
 LOCATEANYTHING_ID = cfg["LOCATEANYTHING_ID"]
 YOLO_MODEL = cfg["YOLO_MODEL"]
 
 INPUT_DIR = cfg["INPUT_DIR"]
 OUTPUT_DIR = cfg["OUTPUT_DIR"]
-RESULTS_FILE = cfg["RESULTS_FILE"]
 
 DETECTION_PROMPTS = cfg["DETECTION_PROMPTS"]
 SUPPORTED_EXTENSIONS = cfg["SUPPORTED_EXTENSIONS"]
+
+SAVE_ANNOTATED_IMAGES = cfg.get("SAVE_ANNOTATED_IMAGES", True)
 
 MAX_NEW_TOKENS = cfg["MAX_NEW_TOKENS"]
 REPETITION_PENALTY = cfg["REPETITION_PENALTY"]
@@ -53,8 +58,7 @@ def load_model():
         model = YOLO(YOLO_MODEL)
         print(f"✅ YOLOv8 loaded: {YOLO_MODEL}")
         return model, None
-
-    else:  # locateanything
+    else:
         from transformers import AutoProcessor, AutoModel
         processor = AutoProcessor.from_pretrained(LOCATEANYTHING_ID, trust_remote_code=True)
         model = AutoModel.from_pretrained(
@@ -64,7 +68,6 @@ def load_model():
             attn_implementation="sdpa",
         )
 
-        # Force SDPA attention
         for obj in [model, getattr(model, "language_model", None),
                     getattr(getattr(model, "language_model", None), "model", None)]:
             if obj and hasattr(obj, "_attn_implementation"):
@@ -107,7 +110,6 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
         cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), BOX_COLOR, -1)
         cv2.putText(annotated, label, (x1 + 2, y1 - 4), FONT, FONT_SCALE, (0, 0, 0), 1)
 
-        # Centroid
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         cv2.circle(annotated, (cx, cy), 6, (0, 0, 255), -1)
@@ -125,7 +127,7 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
 
 # ─── YOLO DETECTION ─────────────────────────────────────────────────────────
 def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.3, verbose=False)[0]
+    results = model(image, conf=0.25, verbose=False)[0]
     detections = []
     for box in results.boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -140,11 +142,15 @@ def detect_with_yolo(image: Image.Image, model):
 def filter_detections(detections, img_w, img_h):
     img_area = img_w * img_h
     min_area = MIN_BOX_AREA_FRACTION * img_area
-    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
+    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections 
+             if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
     sized.sort(key=lambda x: x[0], reverse=True)
     accepted = []
     for _, det in sized:
-        if not any((min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD for k in accepted):
+        if not any((min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * 
+                   (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / 
+                   max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD 
+                   for k in accepted):
             accepted.append(det)
     return accepted
 
@@ -229,7 +235,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
     image_files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
     prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all brome plants separately."
 
-    print(f"Model Type: {MODEL_TYPE} | Prompt: \"{prompt}\"\n")
+    print(f"Model Type: {MODEL_TYPE} | Save Annotated Images: {SAVE_ANNOTATED_IMAGES}\n")
 
     all_results = []
     for idx, img_path in enumerate(image_files):
@@ -249,25 +255,51 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
 
         print(f"  → {len(detections)} weed(s) detected ({elapsed:.1f}s)")
 
-        annotated = draw_detections(bgr_image, detections)
-        out_path = output_path / f"detected_{img_path.stem}.jpg"
-        cv2.imwrite(str(out_path), annotated)
+        if SAVE_ANNOTATED_IMAGES:
+            annotated = draw_detections(bgr_image, detections)
+            out_path = output_path / f"detected_{img_path.stem}.jpg"
+            cv2.imwrite(str(out_path), annotated)
+            print(f"  → Saved annotated image")
 
         all_results.append({
             "image": img_path.name,
-            "model_type": MODEL_TYPE,
             "weed_count": len(detections),
             "detections": detections,
             "raw_output": raw_text[:500],
             "inference_time_seconds": round(elapsed, 2),
         })
 
-        print(f"  → Saved: {out_path.name}\n")
+        print(f"  → Detection data saved\n")
 
-    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"config": {"model_type": MODEL_TYPE}, "results": all_results}, f, indent=2)
+    # Save model-specific detections.json
+    base_name = "yolo" if MODEL_TYPE == "yolo" else "locateanything"
+    detections_file = RESULTS_ROOT / f"{base_name}_detections.json"
 
-    print("✅ Pipeline completed successfully!")
+    config_info = {
+        "model_type": MODEL_TYPE,
+        "save_annotated_images": SAVE_ANNOTATED_IMAGES,
+        "device": cfg["DEVICE"],
+        "dtype": str(cfg["DTYPE"]).replace("torch.", "")
+    }
+
+    if MODEL_TYPE == "locateanything":
+        config_info.update({
+            "prompt": prompt,
+            "min_box_area_fraction": MIN_BOX_AREA_FRACTION,
+            "containment_threshold": CONTAINMENT_THRESHOLD,
+            "max_new_tokens": MAX_NEW_TOKENS,
+            "repetition_penalty": REPETITION_PENALTY,
+            "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
+        })
+
+    with open(detections_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "config": config_info,
+            "results": all_results
+        }, f, indent=2)
+
+    print(f"✅ Pipeline completed!")
+    print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":
