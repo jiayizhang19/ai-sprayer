@@ -29,7 +29,7 @@ AI-Sprayer/
   ├── runs/                          <- training run artifacts, including weights and metrics
   ├── model_evaluation/              <- evaluate model performance on test set
   ├── weed_detections/               <- annotated detection images
-  └── weed_detections.json               <- current detection export to ros2
+  └── weed_detections.json           <- current detection export to ros2
 ```
 ## Detection Models
 
