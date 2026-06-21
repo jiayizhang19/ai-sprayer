@@ -7,14 +7,15 @@
 
 
 model:
-  model_type: "locateanything"        # Options: "locateanything" or "yolo"
+  model_type: "yolo"        # Options: "locateanything" or "yolo"
   locateanything_id: "nvidia/LocateAnything-3B"   # Only used for LocateAnything
-  yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/oppd_weeds_yolov8n/weights/best.pt'  # Only used for YOLO
+  yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep30_b4_lr0.0002/weights/best.pt'  # Only used for YOLO
   device: "cpu"
   dtype: "float32"
 
 paths:
-  input_dir: "weed_images"           # folder with your weed images
+  # input_dir: "weed_images"           # folder with your weed images
+  input_dir: "images/test"           # folder with your weed images
   output_dir: "weed_detections"      # annotated images saved here
   results_file: "detections.json"    # all bounding boxes saved here
 
@@ -24,8 +25,10 @@ detection:
   # e.g. "Locate all broadleaf weeds between the crop rows."
   prompts:
     # - "Locate all chickweed in this image."
-    - "Locate all brome plants separately. Draw one bounding box per individual plant. If there is no brome present, do not detect anything."
-    # - "Locate all the instances that match the following description: weed"
+    # - "Locate all brome plants separately. Draw one bounding box per individual plant. If there is no brome present, do not detect anything."
+    - "Locate all individual weed plants in this image. Detect every weed regardless of species."
+    - "Provide one separate bounding box for each distinct weed plant. Do not merge nearby plants."
+    - "If no weeds are present, detect nothing."
 
   supported_extensions:
     - ".jpg"

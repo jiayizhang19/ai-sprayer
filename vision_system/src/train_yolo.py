@@ -46,7 +46,6 @@ def load_train_config(path: Path = TRAIN_CONFIG_PATH) -> dict:
     # --- model ---
     cfg["BASE_WEIGHTS"] = raw["model"]["base_weights"]
     cfg["PROJECT_DIR"] = PROJECT_ROOT / raw["model"]["project_dir"]
-    cfg["RUN_NAME"] = raw["model"]["run_name"]
 
     # --- training ---
     cfg["EPOCHS"] = raw["training"]["epochs"]
@@ -77,6 +76,28 @@ def load_train_config(path: Path = TRAIN_CONFIG_PATH) -> dict:
     cfg["VAL_CONF"] = raw["validation"]["conf_threshold"]
 
     return cfg
+
+
+def build_run_name(cfg: dict) -> str:
+    """
+    Auto-generate a unique run name from the actual hyperparameters used,
+    so different configs (epochs, batch size, learning rate, model version)
+    never collide and overwrite each other's saved weights.
+
+    e.g. "yolov8n_ep20_b4_lr0.0002"
+    """
+    # base_weights is typically "yolov8n.pt" -> use "yolov8n" as the version tag
+    model_version = Path(cfg["BASE_WEIGHTS"]).stem
+
+    lr0 = cfg["LR0"]
+    lr_tag = f"lr{lr0}" if lr0 is not None else "lrauto"
+
+    return (
+        f"{model_version}"
+        f"_ep{cfg['EPOCHS']}"
+        f"_b{cfg['BATCH_SIZE']}"
+        f"_{lr_tag}"
+    )
 
 
 def verify_dataset(data_yaml_path: Path) -> dict:
@@ -185,6 +206,7 @@ def train():
     from ultralytics import YOLO
 
     cfg = load_train_config()
+    cfg["RUN_NAME"] = build_run_name(cfg)
 
     print("=" * 70)
     print("YOLOv8 Fine-Tuning — OPPD Weed Dataset")
@@ -249,12 +271,18 @@ def train():
     print("\nTo use this model in your inference pipeline, set in config.yaml:")
     print(f'  yolo_model: "{best_weights}"')
 
-    # Run final validation on the val split and print the headline metrics
+    # Run final validation on the val split and print the headline metrics.
+    # project/name keep this inside the same run folder as training
+    # (runs/train/<run_name>/val/) instead of Ultralytics' default
+    # runs/detect/val/, which would otherwise clutter a separate tree.
     print("\nRunning final validation...")
     metrics = model.val(
         data=str(runtime_data_yaml),
         iou=cfg["VAL_IOU"],
         conf=cfg["VAL_CONF"],
+        project=str(cfg["PROJECT_DIR"]),
+        name=f"{cfg['RUN_NAME']}/val",
+        exist_ok=True,
     )
     print(f"\nmAP50:    {metrics.box.map50:.4f}")
     print(f"mAP50-95: {metrics.box.map:.4f}")

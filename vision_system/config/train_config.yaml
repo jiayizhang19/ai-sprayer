@@ -16,10 +16,14 @@ model:
 
   # Where the final best.pt and training run artifacts are saved.
   project_dir: "runs/train"
-  run_name: "oppd_weeds_yolov8n"
+
+  # The run folder name is auto-generated from the actual hyperparameters
+  # used (model version, epochs, batch size, learning rate), e.g.
+  # "yolov8n_ep20_b4_lr0.0002" — so different hyperparameter combinations
+  # never overwrite each other's weights.
 
 training:
-  epochs: 10
+  epochs: 40
   image_size: 640
   batch_size: 4          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
   device: "cpu"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU

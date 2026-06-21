@@ -4,7 +4,7 @@
     "save_annotated_images": true,
     "device": "cpu",
     "dtype": "float32",
-    "prompt": "Locate all brome plants separately. Draw one bounding box per individual plant. If there is no brome present, do not detect anything.",
+    "prompt": "Locate all individual weed plants in this image. Detect every weed regardless of species.",
     "min_box_area_fraction": 0.005,
     "containment_threshold": 0.8,
     "max_new_tokens": 256,
@@ -14,155 +14,38 @@
   "results": [
     {
       "image": "capture_001_Brome_png.rf.87a3646cbb63b75cb3b0907ee0829db5.jpg",
-      "weed_count": 3,
-      "detections": [
-        {
-          "label": "brome",
-          "x1": 188,
-          "y1": 112,
-          "x2": 496,
-          "y2": 480
-        },
-        {
-          "label": "brome",
-          "x1": 442,
-          "y1": 254,
-          "x2": 640,
-          "y2": 629
-        },
-        {
-          "label": "brome",
-          "x1": 234,
-          "y1": 408,
-          "x2": 476,
-          "y2": 632
-        }
-      ],
-      "raw_output": "<ref>brome plants</ref><box><294><175><775><750></box><box><366><638><744><988></box><box><688><400><998><983></box><box><691><398><1000><984></box><box><694><402><997><981></box><box><695><403><995><980></box><box><697><406><994><986></box><box><698><408><992><989></box><box><700><409><991><991></box><box><702><411><993><991></box><box><703><412><994><991></box><box><705><414><994><991></box><box><706><416><994><991></box><box><708><417><994><991></box><box><709><419><994><991></box><box><711><",
-      "inference_time_seconds": 60.8
+      "weed_count": 0,
+      "detections": [],
+      "raw_output": "<ref>weed</ref> weed<box><998><1000><1000><1000></box><box><995><0><999><2></box><box><997><0><1000><1000></box><box><994><0><1000><1000></box><box><992><0><1000><1000></box><box><993><0><1000><1000></box><box><996><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><1000><0><1000><1000></box><box><10",
+      "inference_time_seconds": 88.99
     },
     {
       "image": "capture_002_Brome_png.rf.43e87e087b046a330d5471e5567ba40b.jpg",
-      "weed_count": 6,
-      "detections": [
-        {
-          "label": "brome",
-          "x1": 170,
-          "y1": 106,
-          "x2": 400,
-          "y2": 522
-        },
-        {
-          "label": "brome",
-          "x1": 1,
-          "y1": 304,
-          "x2": 218,
-          "y2": 638
-        },
-        {
-          "label": "brome",
-          "x1": 128,
-          "y1": 1,
-          "x2": 408,
-          "y2": 243
-        },
-        {
-          "label": "brome",
-          "x1": 0,
-          "y1": 0,
-          "x2": 188,
-          "y2": 330
-        },
-        {
-          "label": "brome",
-          "x1": 224,
-          "y1": 490,
-          "x2": 389,
-          "y2": 638
-        },
-        {
-          "label": "brome",
-          "x1": 609,
-          "y1": 115,
-          "x2": 640,
-          "y2": 640
-        }
-      ],
-      "raw_output": "<ref>brome plants</ref><box><0><0><294><516></box><box><2><475><341><998></box><box><200><3><638><381></box><box><266><166><625><816></box><box><350><766><609><997></box><box><953><812><1000><1000></box><box><952><180><1000><1000></box><box><955><178><1000><1000></box><box><956><177><1000><1000></box><box><958><175><1000><1000></box><box><959><173><1000><1000></box><box><961><172><1000><1000></box><box><962><170><1000><1000></box><box><964><169><1000><1000></box><box><966><167><1000><1000></box>",
-      "inference_time_seconds": 61.45
+      "weed_count": 0,
+      "detections": [],
+      "raw_output": "<ref>weed</ref> weed<box><0><2><312><516></box><box><3><469><344><998></box><box><206><5><638><381></box><box><266><166><625><816></box><box><350><753><644><997></box><box><953><822><994><869></box><box><959><172><1000><225></box><box><962><633><992><688></box><box><966><944><995><991></box><box><973><253><1000><320></box><box><977><494><1000><531></box><box><978><534><1000><594></box><box><981><589><1000><456></box><box><983><453><1000><481></box><box><984><478><1000><506></box><box><988><322><",
+      "inference_time_seconds": 69.5
     },
     {
       "image": "capture_027_Chickweed_png.rf.764177ab7d01801da55e49a8e66e9a47.jpg",
-      "weed_count": 1,
-      "detections": [
-        {
-          "label": "brome",
-          "x1": 0,
-          "y1": 0,
-          "x2": 638,
-          "y2": 638
-        }
-      ],
-      "raw_output": "<ref>brome plants</ref><box><0><0><998><998></box><box><775><494><998><997></box><box><2><50><62><167></box><box><3><172><69><225></box><box><5><430><112><506></box><box><6><575><53><678></box><box><9><231><66><278></box><box><12><269><70><312></box><box><16><311><75><350></box><box><25><344><78><383></box><box><30><381><83><412></box><box><31><406><84><416></box><box><34><414><86><441></box><box><38><409><88><434></box><box><42><436><91><453></box><box><44><450><94><475></box><box><45><472><97>",
-      "inference_time_seconds": 61.7
+      "weed_count": 0,
+      "detections": [],
+      "raw_output": "<ref>weed</ref><box><0><52><25><83></box><box><72><650><97><678></box><box><94><486><112><509></box><box><100><284><117><303></box><box><111><772><133><800></box><box><116><583><131><605></box><box><125><756><147><777></box><box><142><450><164><475></box><box><155><969><177><994></box><box><169><109><188><128></box><box><184><281><198><305></box><box><186><205><203><227></box><box><195><320><211><342></box><box><212><950><234><977></box><box><214><809><233><833></box><box><216><114><236><141></b",
+      "inference_time_seconds": 74.78
     },
     {
       "image": "capture_028_Chickweed_png.rf.5e5bf800c5185abd919959b742595ae8.jpg",
-      "weed_count": 1,
-      "detections": [
-        {
-          "label": "brome",
-          "x1": 0,
-          "y1": 0,
-          "x2": 640,
-          "y2": 640
-        }
-      ],
-      "raw_output": "<ref>brome plants</ref><box><0><0><1000><1000></box><box><2><2><998><997></box><box><3><3><998><994></box><box><5><0><998><995></box><box><6><0><998><992></box><box><8><0><998><991></box><box><9><0><998><989></box><box><11><0><998><988></box><box><12><0><998><986></box><box><14><0><998><984></box><box><16><0><998><983></box><box><17><0><998><981></box><box><19><0><998><980></box><box><20><0><998><977></box><box><22><0><998><975></box><box><25><0><998><972></box><box><26><0><998><969></box><box><",
-      "inference_time_seconds": 58.21
+      "weed_count": 0,
+      "detections": [],
+      "raw_output": "<ref>weed</ref><box><0><691><16><712></box><box><12><173><34><197></box><box><50><388><62><406></box><box><73><225><86><256></box><box><78><66><95><88></box><box><108><322><122><339></box><box><109><605><128><631></box><box><111><717><125><738></box><box><112><112><127><130></box><box><114><969><131><988></box><box><119><703><138><725></box><box><141><319><152><338></box><box><142><434><159><453></box><box><156><369><172><391></box><box><158><922><180><945></box><box><170><872><188><898></box><b",
+      "inference_time_seconds": 76.56
     },
     {
       "image": "capture_088_Nettle_png.rf.f7b3cd4e66b38935656526762f74b69a.jpg",
-      "weed_count": 5,
-      "detections": [
-        {
-          "label": "brome",
-          "x1": 0,
-          "y1": 1,
-          "x2": 140,
-          "y2": 638
-        },
-        {
-          "label": "brome",
-          "x1": 263,
-          "y1": 85,
-          "x2": 469,
-          "y2": 414
-        },
-        {
-          "label": "brome",
-          "x1": 481,
-          "y1": 355,
-          "x2": 636,
-          "y2": 629
-        },
-        {
-          "label": "brome",
-          "x1": 609,
-          "y1": 0,
-          "x2": 639,
-          "y2": 625
-        },
-        {
-          "label": "brome",
-          "x1": 307,
-          "y1": 544,
-          "x2": 435,
-          "y2": 632
-        }
-      ],
-      "raw_output": "<ref>brome</ref> plants</ref><box><0><2><220><998></box><box><412><133><733><648></box><box><458><848><684><94></box><box><481><850><681><988></box><box><753><556><994><984></box><box><814><262><903><434></box><box><900><73><995><294></box><box><944><303><997><400></box><box><945><3><1000><83></box><box><947><84><992><177></box><box><948><0><991><981></box><box><950><0><993><983></box><box><952><0><996><980></box><box><953><0><999><978></box><box><955><0><999><977></box><box><956><0><999><975></",
-      "inference_time_seconds": 59.47
+      "weed_count": 0,
+      "detections": [],
+      "raw_output": "<ref>weed</ref> weed<box><728><1000><1000><1000></box><box><753><658><888><866></box><box><803><872><878><981></box><box><850><806><906><880></box><box><875><597><950><750></box><box><877><736><919><814></box><box><883><862><972><953></box><box><902><73><962><156></box><box><912><191><994><288></box><box><938><556><983><733></box><box><944><0><998><100></box><box><948><738><978><816></box><box><952><306><992><388></box><box><956><102><995><173></box><box><958><172><991><250></box><box><964><812>",
+      "inference_time_seconds": 66.81
     }
   ]
 }

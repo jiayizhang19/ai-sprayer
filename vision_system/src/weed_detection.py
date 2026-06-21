@@ -98,6 +98,26 @@ def clean_label(label: str) -> str:
     return label
 
 
+def to_ros_detection(det: dict) -> dict:
+    """
+    Convert an internal detection dict (x1,y1,x2,y2,label,[confidence]) into
+    the flat schema consumed downstream by the ROS2 integration:
+        {class, centroid_x, centroid_y, bbox: {x1,y1,x2,y2}, confidence}
+
+    centroid_x/centroid_y are pixel coordinates in the image frame (the
+    midpoint of the bounding box), since that's what the robot's targeting
+    logic expects.
+    """
+    x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
+    return {
+        "class": det.get("label", "weed"),
+        "centroid_x": (x1 + x2) // 2,
+        "centroid_y": (y1 + y2) // 2,
+        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+        "confidence": det.get("confidence"),  # None for LocateAnything (no native confidence score)
+    }
+
+
 def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray:
     annotated = image_bgr.copy()
     for i, det in enumerate(detections):
@@ -264,7 +284,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
         all_results.append({
             "image": img_path.name,
             "weed_count": len(detections),
-            "detections": detections,
+            "detections": [to_ros_detection(d) for d in detections],
             "raw_output": raw_text[:500],
             "inference_time_seconds": round(elapsed, 2),
         })
