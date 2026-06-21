@@ -2,26 +2,11 @@
 YOLOv8 Fine-Tuning on the OPPD Weed Dataset
 --------------------------------------------
 Fine-tunes a COCO-pretrained YOLOv8 checkpoint on your labeled weed dataset
-(converted to YOLO format via convert_to_yolo.py) so it can actually
-recognize weed species instead of generic COCO objects.
-
-All settings are loaded from config/train_config.yaml — edit that file to
-change epochs, batch size, augmentation, etc. No need to edit this script.
-
-Usage (from vision_system/):
-    python src/train_yolo.py
-
-Output:
-    runs/train/<run_name>/weights/best.pt   <- use this in your inference
-                                                pipeline's config.yaml
-                                                (yolo_model: "runs/train/.../best.pt")
-    runs/train/<run_name>/                  <- full training logs, plots,
-                                                confusion matrix, val predictions
+and saves a detailed markdown performance summary directly to the run directory.
 """
 
 import sys
 import shutil
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -79,16 +64,8 @@ def load_train_config(path: Path = TRAIN_CONFIG_PATH) -> dict:
 
 
 def build_run_name(cfg: dict) -> str:
-    """
-    Auto-generate a unique run name from the actual hyperparameters used,
-    so different configs (epochs, batch size, learning rate, model version)
-    never collide and overwrite each other's saved weights.
-
-    e.g. "yolov8n_ep20_b4_lr0.0002"
-    """
-    # base_weights is typically "yolov8n.pt" -> use "yolov8n" as the version tag
+    """Auto-generate a unique run name from the actual hyperparameters used."""
     model_version = Path(cfg["BASE_WEIGHTS"]).stem
-
     lr0 = cfg["LR0"]
     lr_tag = f"lr{lr0}" if lr0 is not None else "lrauto"
 
@@ -101,12 +78,7 @@ def build_run_name(cfg: dict) -> str:
 
 
 def verify_dataset(data_yaml_path: Path) -> dict:
-    """
-    Basic sanity check before kicking off a (potentially long) training run:
-    confirms the dataset YAML exists, paths resolve, and image/label folders
-    actually contain files. Fails fast with a clear message rather than
-    burning time on a misconfigured run.
-    """
+    """Basic sanity check before kicking off a training run."""
     if not data_yaml_path.exists():
         raise FileNotFoundError(
             f"Dataset YAML not found: {data_yaml_path}\n"
@@ -130,9 +102,6 @@ def verify_dataset(data_yaml_path: Path) -> dict:
                 return candidate
         return None
 
-    # The current workspace keeps labels as flat .txt files in vision_system/labels.
-    # Ultralytics expects labels/train, labels/val, etc., so mirror the existing
-    # labels into split-specific folders if needed.
     flat_label_root = dataset_root / "labels"
     if flat_label_root.exists():
         for split in ("train", "val", "test"):
@@ -171,23 +140,18 @@ def verify_dataset(data_yaml_path: Path) -> dict:
             raise ValueError(f"'{split}' image folder is empty: {img_dir}")
         print(f"  {split}: {img_count} images found in {img_dir}")
 
-        # Matching labels folder (images/train -> labels/train)
         label_dir = Path(str(img_dir).replace("images", "labels", 1))
         if not label_dir.exists():
             print(f"  ⚠️  WARNING: expected labels folder not found: {label_dir}")
         else:
             label_count = sum(1 for f in label_dir.iterdir() if f.suffix == ".txt")
             print(f"  {split}: {label_count} label files found in {label_dir}")
-            if label_count < img_count:
-                print(f"  ⚠️  WARNING: fewer label files ({label_count}) than images "
-                      f"({img_count}) in '{split}' — some images may have no "
-                      f"ground truth (only OK if they're genuinely weed-free).")
 
     return data_cfg
 
 
 def build_runtime_data_yaml(data_yaml_path: Path) -> Path:
-    """Create a temporary Ultralytics dataset YAML with an absolute dataset root."""
+    """Create a persistent data runtime configuration inside the config directory to prevent OS sweeps."""
     with open(data_yaml_path, "r", encoding="utf-8") as f:
         data_cfg = yaml.safe_load(f)
 
@@ -195,7 +159,8 @@ def build_runtime_data_yaml(data_yaml_path: Path) -> Path:
     runtime_cfg = dict(data_cfg)
     runtime_cfg["path"] = str(dataset_root)
 
-    runtime_yaml = Path(tempfile.gettempdir()) / "ai_sprayer_yolo_data_runtime.yaml"
+    # Save to standard config folder so it persists safely throughout the entire pipeline lifetime
+    runtime_yaml = PROJECT_ROOT / "config" / "data_runtime.yaml"
     with open(runtime_yaml, "w", encoding="utf-8") as f:
         yaml.safe_dump(runtime_cfg, f, sort_keys=False)
 
@@ -225,69 +190,105 @@ def train():
     print(f"Output dir: {cfg['PROJECT_DIR']}")
     print("-" * 70)
 
-    # Load a COCO-pretrained checkpoint as the starting point. This is
-    # fine-tuning, not training from scratch: the backbone already knows
-    # general visual features (edges, textures, shapes), and training
-    # adapts it to recognize your specific weed species.
     model = YOLO(cfg["BASE_WEIGHTS"])
 
-    model.train(
-        data=str(runtime_data_yaml),
-        epochs=cfg["EPOCHS"],
-        imgsz=cfg["IMAGE_SIZE"],
-        batch=cfg["BATCH_SIZE"],
-        device=cfg["DEVICE"],
-        optimizer=cfg["OPTIMIZER"],
-        lr0=cfg["LR0"],
-        momentum=cfg["MOMENTUM"],
-        patience=cfg["PATIENCE"],
-        workers=cfg["WORKERS"],
-        resume=cfg["RESUME"],
-        project=str(cfg["PROJECT_DIR"]),
-        name=cfg["RUN_NAME"],
+    try:
+        model.train(
+            data=str(runtime_data_yaml),
+            epochs=cfg["EPOCHS"],
+            imgsz=cfg["IMAGE_SIZE"],
+            batch=cfg["BATCH_SIZE"],
+            device=cfg["DEVICE"],
+            optimizer=cfg["OPTIMIZER"],
+            lr0=cfg["LR0"],
+            momentum=cfg["MOMENTUM"],
+            patience=cfg["PATIENCE"],
+            workers=cfg["WORKERS"],
+            resume=cfg["RESUME"],
+            project=str(cfg["PROJECT_DIR"]),
+            name=cfg["RUN_NAME"],
 
-        # Augmentation
-        hsv_h=cfg["HSV_H"],
-        hsv_s=cfg["HSV_S"],
-        hsv_v=cfg["HSV_V"],
-        degrees=cfg["DEGREES"],
-        translate=cfg["TRANSLATE"],
-        scale=cfg["SCALE"],
-        fliplr=cfg["FLIPLR"],
-        flipud=cfg["FLIPUD"],
-        mosaic=cfg["MOSAIC"],
+            # Augmentation
+            hsv_h=cfg["HSV_H"],
+            hsv_s=cfg["HSV_S"],
+            hsv_v=cfg["HSV_V"],
+            degrees=cfg["DEGREES"],
+            translate=cfg["TRANSLATE"],
+            scale=cfg["SCALE"],
+            fliplr=cfg["FLIPLR"],
+            flipud=cfg["FLIPUD"],
+            mosaic=cfg["MOSAIC"],
 
-        # Misc
-        exist_ok=True,   # allow re-running with the same run_name without erroring
-        plots=True,      # save training curves, confusion matrix, PR curves
-        verbose=True,
-    )
+            exist_ok=True,
+            plots=True,
+            verbose=True,
+        )
 
-    print("\n" + "=" * 70)
-    print("Training complete.")
+        print("\n" + "=" * 70)
+        print("Training complete.")
 
-    best_weights = cfg["PROJECT_DIR"] / cfg["RUN_NAME"] / "weights" / "best.pt"
-    print(f"Best weights saved to: {best_weights}")
-    print("\nTo use this model in your inference pipeline, set in config.yaml:")
-    print(f'  yolo_model: "{best_weights}"')
+        run_dir = cfg["PROJECT_DIR"] / cfg["RUN_NAME"]
+        best_weights = run_dir / "weights" / "best.pt"
+        print(f"Best weights saved to: {best_weights}")
+        print("\nTo use this model in your inference pipeline, set in config.yaml:")
+        print(f'  yolo_model: "{best_weights}"')
 
-    # Run final validation on the val split and print the headline metrics.
-    # project/name keep this inside the same run folder as training
-    # (runs/train/<run_name>/val/) instead of Ultralytics' default
-    # runs/detect/val/, which would otherwise clutter a separate tree.
-    print("\nRunning final validation...")
-    metrics = model.val(
-        data=str(runtime_data_yaml),
-        iou=cfg["VAL_IOU"],
-        conf=cfg["VAL_CONF"],
-        project=str(cfg["PROJECT_DIR"]),
-        name=f"{cfg['RUN_NAME']}/val",
-        exist_ok=True,
-    )
-    print(f"\nmAP50:    {metrics.box.map50:.4f}")
-    print(f"mAP50-95: {metrics.box.map:.4f}")
-    print(f"Precision: {metrics.box.mp:.4f}")
-    print(f"Recall:    {metrics.box.mr:.4f}")
+        print("\nRunning final validation...")
+        metrics = model.val(
+            data=str(runtime_data_yaml),
+            iou=cfg["VAL_IOU"],
+            conf=cfg["VAL_CONF"],
+            project=str(cfg["PROJECT_DIR"]),
+            name=f"{cfg['RUN_NAME']}/val",
+            exist_ok=True,
+            verbose=True,
+            plots=True
+        )
+        
+        print(f"\nmAP50:    {metrics.box.map50:.4f}")
+        print(f"mAP50-95: {metrics.box.map:.4f}")
+        print(f"Precision: {metrics.box.mp:.4f}")
+        print(f"Recall:    {metrics.box.mr:.4f}")
+
+        # ─── EXPORT SUMMARY REPORT TO .MD ────────────────────────────────────
+        report_target_path = run_dir / "summaried_performance.md"
+        
+        md_content = f"""# YOLOv8 Training Run Performance Summary
+**Run Target Directory:** `{cfg['RUN_NAME']}`  
+**Model Weight Checkpoint:** `{best_weights.name}`
+
+## Overall Performance Summary Split Metrics
+| Metric Name | Value |
+| :--- | :---: |
+| **Precision** | {metrics.box.mp:.4f} |
+| **Recall** | {metrics.box.mr:.4f} |
+| **mAP50** | {metrics.box.map50:.4f} |
+| **mAP50-95** | {metrics.box.map:.4f} |
+
+## Class-Specific Fine-Tuned Performance (Validation Split)
+| Class ID | Class Name | Precision | Recall | mAP50 | mAP50-95 |
+| :---: | :--- | :---: | :---: | :---: | :---: |
+"""
+        if hasattr(metrics, 'classes') and metrics.classes is not None:
+            for idx, class_index in enumerate(metrics.classes):
+                class_name = metrics.names[class_index]
+                cp = metrics.box.p[idx]
+                cr = metrics.box.r[idx]
+                cmap50 = metrics.box.ap50[idx]
+                cmap95 = metrics.box.ap[idx]
+                md_content += f"| {class_index} | **{class_name}** | {cp:.4f} | {cr:.4f} | {cmap50:.4f} | {cmap95:.4f} |\n"
+
+        with open(report_target_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+        print(f"📝 Summary performance report saved safely to: {report_target_path}")
+
+    finally:
+        # Guarantee cleanup happens regardless of exit status
+        if runtime_data_yaml.exists():
+            try:
+                runtime_data_yaml.unlink()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

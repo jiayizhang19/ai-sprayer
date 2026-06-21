@@ -23,12 +23,12 @@ model:
   # never overwrite each other's weights.
 
 training:
-  epochs: 40
+  epochs: 20
   image_size: 640
-  batch_size: 4          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
+  batch_size: 8          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
   device: "cpu"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
   optimizer: "AdamW"      # use "auto" to let Ultralytics choose, but lr0/momentum will be ignored
-  lr0: 0.0002             # initial learning rate used when optimizer is not "auto"
+  lr0: 0.0004             # initial learning rate used when optimizer is not "auto"
   momentum: 0.9           # optimizer momentum used when supported
 
   # Stops training early if validation performance stops improving for this

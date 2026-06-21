@@ -7,18 +7,35 @@ behaviour. No need to touch the Python script.
 ## Project layout
 
 ```
-vision_system/
-├── config/
-│   ├── config.yaml        <- edit this file
-│   └── config_loader.py    (internal — no need to edit)
-├── src/
-│   └── weed_detection_step1.py
-├── weed_images/             <- put your input images here
-├── weed_detections/         <- annotated output images appear here
-└── detections.json          <- detection results appear here
+AI-Sprayer/
+├── README.md                          <- project usage guide
+├── requirements.txt                   <- Python dependency list
+├── yolov8n.pt                         <- base YOLO checkpoint
+└── vision_system/
+  ├── config/
+  │   ├── config.yaml                <- main runtime settings, including model selection and evaluation settings
+  │   ├── config_loader.py           <- loads and maps config
+  │   ├── data.yaml                  <- dataset split and classes
+  │   └── train_config.yaml          <- YOLO training settings, including hyperparameters and optimizer settings for training purposes only
+  ├── src/
+  │   ├── weed_detection.py          <- run weed detection inference, main code for class and centroid detection, parameters in `config/config.yaml`
+  │   ├── detection_evaluation.py    <- evaluate model performance on test set, parameters in `config/config.yaml`
+  │   ├── train_yolo.py              <- fine-tune YOLO weights, parameters in `config/train_config.yaml`
+  │   ├── ground_truth_verification.py <- visualize GT label quality for one time check
+  │   ├── analyze_class_distribution.py <- dataset distribution analysis
+  │   └── generate_run_report.py     <- summarize run metrics (one time runner for historical runs)
+  ├── images/                        <- input images including training, validation, and test sets
+  ├── labels/                        <- YOLO label annotations
+  ├── runs/                          <- training run artifacts, including weights and metrics
+  ├── model_evaluation/              <- evaluate model performance on test set
+  ├── weed_detections/               <- annotated detection images
+  └── weed_detections.json               <- current detection export to ros2
 ```
+## Detection Models
 
-## Parameters (in `config/config.yaml`)
+### YOLOv8
+
+### Locate Anything Parameters (in `config/config.yaml`)
 
 | Parameter | Section | Default | Adjust when... |
 |---|---|---|---|
@@ -34,7 +51,7 @@ vision_system/
 | `no_repeat_ngram_size` | `generation` | `8` | Loops persist → **decrease** (e.g. 4–6). Output cut off too early → **increase** |
 | `max_new_tokens` | `generation` | `512` | Many weeds per image and output gets cut off → **increase** |
 
-## Quick checks
+### Quick checks for Locate Anything output
 
 - **0 detections** → check `raw_model_output` in `detections.json`; if boxes
   are present but `weed_count` is 0, lower `min_box_area_fraction`.

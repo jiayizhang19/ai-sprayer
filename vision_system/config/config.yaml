@@ -6,7 +6,7 @@
 # ============================================================================
 
 
-model:
+model:   # Used for weed_detection inference. See train_config.yaml for training-specific settings.
   model_type: "yolo"        # Options: "locateanything" or "yolo"
   locateanything_id: "nvidia/LocateAnything-3B"   # Only used for LocateAnything
   yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep30_b4_lr0.0002/weights/best.pt'  # Only used for YOLO
@@ -17,7 +17,7 @@ paths:
   # input_dir: "weed_images"           # folder with your weed images
   input_dir: "images/test"           # folder with your weed images
   output_dir: "weed_detections"      # annotated images saved here
-  results_file: "detections.json"    # all bounding boxes saved here
+  results_file: "weed_detections.json"    # all bounding boxes saved here
 
 detection:
   # Natural language prompt(s) sent to the model.
@@ -74,3 +74,17 @@ visualization:
   label_color_bgr: [0, 255, 0]
   font: "FONT_HERSHEY_SIMPLEX"
   font_scale: 0.6
+
+
+# ============================================================================
+# Evaluation Configuration (Independent Execution)
+# ============================================================================
+evaluation:
+  eval_model_type: "yolo"        # Options: "yolo" or "locateanything"
+  
+  # Specify the exact fine-tuned model weights or ID you want to test:
+  eval_yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep20_b8_lr0.0004/weights/best.pt'
+  eval_locateanything_id: "nvidia/LocateAnything-3B"
+
+  # Set to true to generate and save verification frames with boxes & centroids.
+  visualize_detections: true

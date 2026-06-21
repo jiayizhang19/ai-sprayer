@@ -8,7 +8,6 @@ import torch
 import cv2
 import yaml
 
-
 CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 _DTYPE_MAP = {
@@ -43,6 +42,10 @@ def load_config(config_path: Path = CONFIG_PATH) -> dict:
     cfg["DEVICE"] = model_section["device"]
     dtype_str = model_section["dtype"]
     cfg["DTYPE"] = _DTYPE_MAP[dtype_str]
+
+    # --- Evaluation Block ---
+    eval_section = raw.get("evaluation", {})
+    cfg["VISUALIZE_DETECTIONS"] = eval_section.get("visualize_detections", True)
 
     # --- Paths ---
     cfg["INPUT_DIR"] = project_root / raw["paths"]["input_dir"]

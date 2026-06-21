@@ -1,54 +1,84 @@
 """
-Evaluation Script: Model vs Ground Truth
+Evaluation Script: Model vs Ground Truth (Independent Execution)
 -------------------------------------------------
-Checks for both yolo_detections.json and locateanything_detections.json
-Generates corresponding evaluation reports for each.
+Runs independent live inference on images using a configured evaluation model,
+and scores the results against ground truth annotations.
 """
 
+import sys
 import json
 from pathlib import Path
-import sys
-
+import yaml
 import numpy as np
 from PIL import Image
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
+# ─── CONFIG & PATHS ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config_loader import load_config
+import weed_detection  # Reused for loading & inference logic
 
 cfg = load_config()
-
-# Use the SAME image folder that weed_detection.py read from when it
-# generated the detections.json being evaluated here. Previously this was
-# hardcoded to "weed_images", which silently broke evaluation whenever
-# config.yaml's paths.input_dir pointed elsewhere (e.g. "images/test").
 IMAGES_DIR = cfg["INPUT_DIR"]
 
-# Ground truth labels are expected to live in a folder structure mirroring
-# the images: if input_dir is "images/test", labels are expected in
-# "labels/test" (Ultralytics-style layout), with a fallback to a flat
-# "labels/" folder for setups that don't use split subfolders.
+# Safely extract independent evaluation block from config.yaml
+with open(PROJECT_ROOT / "config" / "config.yaml", "r", encoding="utf-8") as f:
+    raw_yaml = yaml.safe_load(f)
+
+eval_section = raw_yaml.get("evaluation", {})
+EVAL_MODEL_TYPE = eval_section.get("eval_model_type", "yolo").lower()
+EVAL_YOLO_MODEL = eval_section.get("eval_yolo_model", cfg["YOLO_MODEL"])
+EVAL_LOCATEANYTHING_ID = eval_section.get("eval_locateanything_id", cfg["LOCATEANYTHING_ID"])
+
+# Hot-patch weed_detection config variables dynamically to respect the eval settings
+weed_detection.MODEL_TYPE = EVAL_MODEL_TYPE
+weed_detection.YOLO_MODEL = EVAL_YOLO_MODEL
+weed_detection.LOCATEANYTHING_ID = EVAL_LOCATEANYTHING_ID
+
+# Ground truth setup
 _input_dir_name = Path(cfg["INPUT_DIR"]).name  # e.g. "test" from "images/test"
 _split_labels_dir = PROJECT_ROOT / "labels" / _input_dir_name
 GT_LABELS_DIR = _split_labels_dir if _split_labels_dir.exists() else PROJECT_ROOT / "labels"
 
-RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
+# Updated results root directory path name
+RESULTS_ROOT = PROJECT_ROOT / "model_evaluation"
+RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 IOU_THRESHOLD = 0.5
 
-print(f"Using IoU threshold = {IOU_THRESHOLD}")
-print(f"Reading images from: {IMAGES_DIR}")
-print(f"Reading ground truth labels from: {GT_LABELS_DIR}\n")
+
+# ─── EXPERIMENT NAME PARSING ────────────────────────────────────────────────
+def get_experiment_model_name() -> str:
+    """
+    Extracts a short identifying name for the model file naming and configuration tracking.
+    For YOLO weights path: extraction grabs the parent directory name of 'weights' (the run name).
+    For LocateAnything HuggingFace ID: grabs the repository name string.
+    """
+    if EVAL_MODEL_TYPE == "yolo":
+        path_obj = Path(EVAL_YOLO_MODEL)
+        # If path looks like .../train/yolov8n_ep30_b4_lr0.0002/weights/best.pt
+        if path_obj.parent.name == "weights":
+            return path_obj.parent.parent.name
+        return path_obj.stem
+    else:
+        # e.g., 'nvidia/LocateAnything-3B' -> 'LocateAnything-3B'
+        return EVAL_LOCATEANYTHING_ID.split("/")[-1]
+
+MODEL_EXP_NAME = get_experiment_model_name()
+
+print(f"========================================================================")
+print(f"Starting Independent Evaluation Workflow")
+print(f"========================================================================")
+print(f"Target Architecture: {EVAL_MODEL_TYPE.upper()}")
+print(f"Target Experiment:   {MODEL_EXP_NAME}")
+print(f"Target Model/Path:   {EVAL_YOLO_MODEL if EVAL_MODEL_TYPE == 'yolo' else EVAL_LOCATEANYTHING_ID}")
+print(f"Images Path:        {IMAGES_DIR}")
+print(f"Ground Truth Path:  {GT_LABELS_DIR}\n")
 
 
 # ─── CLASS NAME RESOLUTION ───────────────────────────────────────────────────
 def load_class_id_map() -> dict:
-    """Maps ground truth class_id (int) -> class code (e.g. 5 -> 'BROST'),
-    read from config/data.yaml so this stays in sync with however the
-    dataset was labeled, instead of hardcoding the class list here."""
-    import yaml
     data_yaml_path = PROJECT_ROOT / "config" / "data.yaml"
     if not data_yaml_path.exists():
         return {}
@@ -56,22 +86,10 @@ def load_class_id_map() -> dict:
         data_cfg = yaml.safe_load(f)
     return {int(k): v for k, v in data_cfg.get("names", {}).items()}
 
-
 CLASS_ID_MAP = load_class_id_map()
 
 
 def label_matches_class(predicted_label: str, gt_class_code: str) -> bool:
-    """
-    True if a prediction's free-text/coded label refers to the same species
-    as the ground truth class code. Case-insensitive substring match in
-    both directions, since:
-      - A correctly-trained YOLO model predicts the exact code (e.g. "BROST").
-      - LocateAnything predicts free text (e.g. "brome"), which won't
-        literally contain "BROST", so the code alone isn't enough — but for
-        now we match on exact/substring code agreement; species-name
-        synonyms (e.g. "brome") can be layered in via a synonym map if
-        LocateAnything's output is also being evaluated here.
-    """
     predicted_label = (predicted_label or "").strip().lower()
     gt_class_code = (gt_class_code or "").strip().lower()
     if not predicted_label or not gt_class_code:
@@ -79,7 +97,6 @@ def label_matches_class(predicted_label: str, gt_class_code: str) -> bool:
     return predicted_label == gt_class_code or gt_class_code in predicted_label or predicted_label in gt_class_code
 
 
-# ─── HELPERS (unchanged) ─────────────────────────────────────────────────────
 def load_ground_truth(image_name: str) -> list[dict]:
     stem = Path(image_name).stem.replace("detected_", "").replace("gt_", "")
     label_path = GT_LABELS_DIR / f"{stem}.txt"
@@ -140,18 +157,9 @@ def compute_iou(box1, box2):
 
 
 def match_detections(gt_boxes: list[dict], pred_boxes: list[dict], iou_thresh: float = 0.5) -> dict:
-    """
-    Greedy IoU matching, now requiring BOTH IoU >= iou_thresh AND the
-    predicted label matching the ground truth class for a true positive.
-
-    gt_boxes:   list of {"pixel_box": (x1,y1,x2,y2), "class_code": str}
-    pred_boxes: list of {"pixel_box": (x1,y1,x2,y2), "label": str}
-
-    Returns overall tp/fp/fn plus a per-class breakdown.
-    """
     gt_matched = [False] * len(gt_boxes)
-    matches = []  # (iou, is_tp, gt_class_code or None, pred_label)
-    per_class = {}  # class_code -> {"tp": int, "fp": int, "fn": int}
+    matches = []
+    per_class = {}
 
     def _bump(class_code: str, key: str):
         per_class.setdefault(class_code, {"tp": 0, "fp": 0, "fn": 0})
@@ -177,11 +185,8 @@ def match_detections(gt_boxes: list[dict], pred_boxes: list[dict], iou_thresh: f
             _bump(matched_class, "tp")
         else:
             matches.append((0.0, False))
-            # FP attributed to the class the model claimed it saw, even
-            # though it didn't correctly match anything of that class.
             _bump(p["label"].strip().upper() or "UNKNOWN", "fp")
 
-    # Any unmatched ground truth box is a false negative for its own class.
     for i, gt in enumerate(gt_boxes):
         if not gt_matched[i]:
             _bump(gt["class_code"], "fn")
@@ -200,151 +205,86 @@ def match_detections(gt_boxes: list[dict], pred_boxes: list[dict], iou_thresh: f
     }
 
 
-def build_experiment_config(raw_config: dict | None, model_type: str) -> dict:
-    if not raw_config:
-        return {"model_type": model_type}
-
-    config = {
-        "model_type": model_type,
-        "device": raw_config.get("device", "cpu"),
-        "dtype": str(raw_config.get("dtype", "float32")).replace("torch.", ""),
-    }
-
-    if model_type == "locateanything":
-        config.update({
-            "prompt": raw_config.get("prompt") or raw_config.get("prompt_used"),
-            "min_box_area_fraction": raw_config.get("min_box_area_fraction"),
-            "containment_threshold": raw_config.get("containment_threshold"),
-            "max_new_tokens": raw_config.get("max_new_tokens"),
-            "repetition_penalty": raw_config.get("repetition_penalty"),
-            "no_repeat_ngram_size": raw_config.get("no_repeat_ngram_size"),
-        })
-    else:
-        config["conf_threshold"] = raw_config.get("conf_threshold", 0.25)
-
-    return config
-
-
-def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
-                          overall_precision, overall_recall, overall_f1, mean_iou,
-                          per_image_metrics, experiment_config, model_type, per_class_summary=None):
-    model_name = "YOLOv8" if model_type == "yolo" else "LocateAnything-3B"
+# ─── LOCAL REPORTING UTILITY ─────────────────────────────────────────────────
+def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn, 
+                          precision, recall, f1, mean_iou, per_image_metrics, 
+                          experiment_config, model_type, per_class_summary):
+    """Generates local standalone markdown statistics without weed_detection dependencies."""
+    lines = [
+        f"# Evaluation Report: {model_type.upper()} ({MODEL_EXP_NAME})",
+        "",
+        "## Core Metrics Summary",
+        f"- **Precision:** {precision:.4f}",
+        f"- **Recall:** {recall:.4f}",
+        f"- **F1 Score:** {f1:.4f}",
+        f"- **Mean IoU (Matched):** {mean_iou:.4f}",
+        "",
+        "## Bounding Box Breakdown",
+        f"- **Total Ground Truth Boxes:** {total_gt}",
+        f"- **Total Predicted Boxes:** {total_pred}",
+        f"- **True Positives (TP):** {total_tp}",
+        f"- **False Positives (FP):** {total_fp}",
+        f"- **False Negatives (FN):** {total_fn}",
+        "",
+        "## Per-Class Metrics Table",
+        "| Class Code | TP | FP | FN | Precision | Recall | F1 Score |",
+        "|--- |--- |--- |--- |--- |--- |--- |"
+    ]
+    for cls_code, metrics in per_class_summary.items():
+        lines.append(
+            f"| {cls_code} | {metrics['tp']} | {metrics['fp']} | {metrics['fn']} | "
+            f"{metrics['precision']:.4f} | {metrics['recall']:.4f} | {metrics['f1']:.4f} |"
+        )
     
-    md = f"""# {model_name} Evaluation Report
-
-**Model Type:** {model_type}  
-**IoU Threshold:** {IOU_THRESHOLD}
-
-## Experiment Configuration
-"""
-
-    md += f"- Model Type: **{model_type}**\n"
-    md += f"- Device: {experiment_config.get('device')}\n"
-    md += f"- Dtype: {experiment_config.get('dtype')}\n"
-
-    if model_type == "locateanything":
-        md += f"- Prompt: \"{experiment_config.get('prompt', 'N/A')}\"\n"
-        md += f"- min_box_area_fraction: {experiment_config.get('min_box_area_fraction')}\n"
-        md += f"- containment_threshold: {experiment_config.get('containment_threshold')}\n"
-        md += f"- max_new_tokens: {experiment_config.get('max_new_tokens')}\n"
-        md += f"- repetition_penalty: {experiment_config.get('repetition_penalty')}\n"
-
-    md += f"""
-## Overall Results
-
-**Total Ground Truth boxes:** {total_gt}  
-**Total Predictions:** {total_pred}
-
-| Metric              | Value    |
-|---------------------|----------|
-| True Positives (TP) | {total_tp} |
-| False Positives (FP)| {total_fp} |
-| False Negatives (FN)| {total_fn} |
-| **Precision**       | **{overall_precision:.4f}** |
-| **Recall**          | **{overall_recall:.4f}** |
-| **F1 Score**        | **{overall_f1:.4f}** |
-| **Mean IoU**        | **{mean_iou:.4f}** |
-"""
-
-    if per_class_summary:
-        md += """
-## Per-Class Results
-
-A true positive requires both IoU >= threshold AND the predicted label
-matching the ground truth class — so this breakdown shows which species
-the model actually confuses or misses, rather than just overlapping boxes
-of the wrong class.
-
-| Class | TP | FP | FN | Precision | Recall | F1 |
-|-------|----|----|----|-----------|--------|-----|
-"""
-        for class_code in sorted(per_class_summary.keys()):
-            c = per_class_summary[class_code]
-            md += (f"| {class_code} | {c['tp']} | {c['fp']} | {c['fn']} | "
-                   f"{c['precision']:.4f} | {c['recall']:.4f} | {c['f1']:.4f} |\n")
-
-    md += """
-## Per-Image Results
-
-| Image | GT | Pred | TP | FP | FN | F1 Score |
-|-------|----|------|----|----|----|----------|
-"""
-
-    for r in per_image_metrics:
-        md += f"| {r['image'][:60]}... | {r['gt_count']} | {r['pred_count']} | {r['tp']} | {r['fp']} | {r['fn']} | {r['f1']:.3f} |\n"
-
-    md += "\n---\n*Report generated by detection_evaluation.py*\n"
-    return md
+    lines.extend([
+        "",
+        "## Setup Configuration Context",
+        f"- **Model Identifier:** `{experiment_config.get('model_name')}`",
+        f"- **Device Used:** `{experiment_config.get('device')}`",
+        f"- **Data Type:** `{experiment_config.get('dtype')}`",
+        ""
+    ])
+    return "\n".join(lines)
 
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
-def evaluate_model(detections_file: Path):
-    model_type = "yolo" if "yolo" in detections_file.name else "locateanything"
+# ─── EVALUATION PIPELINE ─────────────────────────────────────────────────────
+def main():
+    # Load the requested model using weed_detection's backend structure
+    model, processor = weed_detection.load_model()
     
-    print(f"Evaluating {model_type.upper()} from: {detections_file.name}")
-
-    with open(detections_file, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    raw_config = payload.get("config", {})
-    all_results = payload.get("results", [])
-
-    experiment_config = build_experiment_config(raw_config, model_type)
+    image_files = sorted(f for f in IMAGES_DIR.iterdir() if f.suffix.lower() in cfg["SUPPORTED_EXTENSIONS"])
+    prompt = cfg["DETECTION_PROMPTS"][0] if cfg["DETECTION_PROMPTS"] else "Locate all brome plants separately."
 
     total_tp = total_fp = total_fn = 0
     all_ious = []
     per_image_metrics = []
-    overall_per_class = {}  # class_code -> {"tp":.., "fp":.., "fn":..}
+    overall_per_class = {}
 
-    for res in all_results:
-        img_name = res["image"]
-        pred_dets = res.get("detections", [])
+    for idx, img_path in enumerate(image_files):
+        print(f"[{idx+1}/{len(image_files)}] Inferencing & Evaluating: {img_path.name}")
+        
+        pil_image = Image.open(img_path).convert("RGB")
+        img_w, img_h = pil_image.size
 
-        image_path = IMAGES_DIR / img_name
-        if not image_path.exists():
-            for ext in [".jpg", ".png", ".jpeg"]:
-                candidate = IMAGES_DIR / f"{Path(img_name).stem}{ext}"
-                if candidate.exists():
-                    image_path = candidate
-                    break
-
-        if image_path.exists():
-            img_w, img_h = Image.open(image_path).size
+        # Fetch predictions dynamically from the model instance
+        if EVAL_MODEL_TYPE == "yolo":
+            detections, _ = weed_detection.detect_with_yolo(pil_image, model)
         else:
-            print(f"  ⚠️  Skipping {img_name}: not found in {IMAGES_DIR}")
-            continue
+            detections, _ = weed_detection.detect_with_locateanything(pil_image, model, processor, prompt)
 
-        gt_norm = load_ground_truth(img_name)
+        gt_norm = load_ground_truth(img_path.name)
         gt_boxes = [
             {"pixel_box": yolo_to_pixel(b, img_w, img_h), "class_code": b["class_code"]}
             for b in gt_norm
         ]
+        
+        # Unify outputs into evaluation bounding format
         pred_boxes = [
             {
-                "pixel_box": (d["bbox"]["x1"], d["bbox"]["y1"], d["bbox"]["x2"], d["bbox"]["y2"]),
-                "label": d.get("class", ""),
+                "pixel_box": (d["x1"], d["y1"], d["x2"], d["y2"]),
+                "label": d.get("label", ""),
             }
-            for d in pred_dets
+            for d in detections
         ]
 
         metrics = match_detections(gt_boxes, pred_boxes, IOU_THRESHOLD)
@@ -362,7 +302,7 @@ def evaluate_model(detections_file: Path):
         f1 = 2 * metrics["precision"] * metrics["recall"] / (metrics["precision"] + metrics["recall"] + 1e-8)
 
         per_image_metrics.append({
-            "image": img_name,
+            "image": img_path.name,
             "gt_count": len(gt_boxes),
             "pred_count": len(pred_boxes),
             "tp": metrics["tp"],
@@ -374,7 +314,7 @@ def evaluate_model(detections_file: Path):
             "mean_iou_matched": np.mean(metrics["matched_ious"]) if metrics["matched_ious"] else 0.0
         })
 
-    # Finalize per-class precision/recall/F1
+    # Summary performance processing
     per_class_summary = {}
     for class_code, counts in overall_per_class.items():
         c_tp, c_fp, c_fn = counts["tp"], counts["fp"], counts["fn"]
@@ -386,7 +326,6 @@ def evaluate_model(detections_file: Path):
             "precision": c_precision, "recall": c_recall, "f1": c_f1,
         }
 
-    # Overall metrics
     total_gt = total_tp + total_fn
     total_pred = total_tp + total_fp
     precision = total_tp / total_pred if total_pred > 0 else 0.0
@@ -394,61 +333,41 @@ def evaluate_model(detections_file: Path):
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
     mean_iou = np.mean(all_ious) if all_ious else 0.0
 
-    base_name = "yolo" if model_type == "yolo" else "locateanything"
-    json_file = RESULTS_ROOT / f"{base_name}_evaluation_results.json"
-    md_file = RESULTS_ROOT / f"{base_name}_evaluation_results.md"
+    # Include parsed experiment name directly into configuration data structure
+    experiment_config = {
+        "model_name": MODEL_EXP_NAME,
+        "device": cfg["DEVICE"],
+        "dtype": str(cfg["DTYPE"]).replace("torch.", ""),
+        "prompt": prompt if EVAL_MODEL_TYPE == "locateanything" else None
+    }
+    
+    # Generate files cleanly locally inside model_evaluation directory
+    json_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.json"
+    md_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.md"
 
     with open(json_file, "w", encoding="utf-8") as f:
         json.dump({
             "experiment_config": experiment_config,
             "overall": {
-                "precision": precision,
-                "recall": recall,
-                "f1": f1,
-                "mean_iou": mean_iou,
-                "tp": total_tp,
-                "fp": total_fp,
-                "fn": total_fn,
-                "total_gt": total_gt,
-                "total_pred": total_pred
+                "precision": precision, "recall": recall, "f1": f1, "mean_iou": mean_iou,
+                "tp": total_tp, "fp": total_fp, "fn": total_fn, "total_gt": total_gt, "total_pred": total_pred
             },
             "per_class": per_class_summary,
             "per_image": per_image_metrics
         }, f, indent=2)
 
-    report_text = build_markdown_report(
+    md_report = build_markdown_report(
         total_gt, total_pred, total_tp, total_fp, total_fn,
-        precision, recall, f1, mean_iou, per_image_metrics, experiment_config, model_type,
+        precision, recall, f1, mean_iou, per_image_metrics, experiment_config, EVAL_MODEL_TYPE,
         per_class_summary=per_class_summary
     )
 
     with open(md_file, "w", encoding="utf-8") as f:
-        f.write(report_text)
+        f.write(md_report)
 
-    print(f"   → JSON: {json_file.name}")
-    print(f"   → MD:   {md_file.name}")
-
-
-# ─── MAIN ────────────────────────────────────────────────────────────────────
-def main():
-    print("=" * 80)
-    print("Starting Evaluation for All Available Models")
-    print("=" * 80)
-
-    evaluated = False
-
-    for file_name in ["yolo_detections.json", "locateanything_detections.json"]:
-        detections_file = RESULTS_ROOT / file_name
-        if detections_file.exists():
-            evaluate_model(detections_file)
-            evaluated = True
-
-    if not evaluated:
-        print(f"❌ No detections files found in {RESULTS_ROOT}")
-        print("Please run weed_detection.py first.")
-        sys.exit(1)
-
-    print("\n✅ All available evaluations completed!")
+    print(f"\n✅ Independent evaluation completed successfully!")
+    print(f"   → Metrics JSON: {json_file.name}")
+    print(f"   → Summary Report MD: {md_file.name}")
 
 
 if __name__ == "__main__":

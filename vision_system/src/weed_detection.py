@@ -1,6 +1,8 @@
 """
 Modular Weed Detection Pipeline
-All outputs saved under yolo_vs_locateanything/ folder
+------------------------------
+Generates standardized classification, bounding box, and centroid coordinate data
+for downstream ROS2 consumption. Reads strictly from the production 'model' block.
 """
 
 import sys
@@ -14,27 +16,27 @@ import cv2
 import numpy as np
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from config.config_loader import load_config
 
 cfg = load_config()
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
-RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+# ─── CONFIG & PATHS ──────────────────────────────────────────────────────────
+RESULTS_FILE = cfg["RESULTS_FILE"]
+RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 MODEL_TYPE = cfg["MODEL_TYPE"]
 LOCATEANYTHING_ID = cfg["LOCATEANYTHING_ID"]
-YOLO_MODEL = cfg["YOLO_MODEL"]
+YOLO_MODEL = cfg["YOLO_MODEL"]  # Reads strictly from primary production block
 
 INPUT_DIR = cfg["INPUT_DIR"]
 OUTPUT_DIR = cfg["OUTPUT_DIR"]
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DETECTION_PROMPTS = cfg["DETECTION_PROMPTS"]
 SUPPORTED_EXTENSIONS = cfg["SUPPORTED_EXTENSIONS"]
-
-SAVE_ANNOTATED_IMAGES = cfg.get("SAVE_ANNOTATED_IMAGES", True)
 
 MAX_NEW_TOKENS = cfg["MAX_NEW_TOKENS"]
 REPETITION_PENALTY = cfg["REPETITION_PENALTY"]
@@ -43,285 +45,277 @@ NO_REPEAT_NGRAM_SIZE = cfg["NO_REPEAT_NGRAM_SIZE"]
 MIN_BOX_AREA_FRACTION = cfg["MIN_BOX_AREA_FRACTION"]
 CONTAINMENT_THRESHOLD = cfg["CONTAINMENT_THRESHOLD"]
 
-BOX_COLOR = cfg["BOX_COLOR"]
-BOX_THICKNESS = cfg["BOX_THICKNESS"]
-FONT = cfg["FONT"]
-FONT_SCALE = cfg["FONT_SCALE"]
+# Extracted dynamically from config.yaml under the evaluation block
+VISUALIZE_DETECTIONS = cfg["VISUALIZE_DETECTIONS"]
 
 
 # ─── MODEL LOADING ───────────────────────────────────────────────────────────
-def load_model():
-    print(f"Loading {MODEL_TYPE.upper()} model...")
-
+def load_model(model_override_path: str = None):
+    """
+    Loads the designated vision model. Defaults strictly to the production config, 
+    but accepts explicit structural path injections from evaluation layers.
+    """
     if MODEL_TYPE == "yolo":
+        target_path = model_override_path if model_override_path else YOLO_MODEL
+        path_obj = Path(target_path)
+        
+        # Pull run folder parent layout name dynamically for trace clarity
+        if path_obj.parent.name == "weights":
+            yolo_display_name = path_obj.parent.parent.name
+        else:
+            yolo_display_name = path_obj.stem
+            
+        print(f"Loading Model Setup [YOLO: {yolo_display_name}]...")
         from ultralytics import YOLO
-        model = YOLO(YOLO_MODEL)
-        print(f"✅ YOLOv8 loaded: {YOLO_MODEL}")
-        return model, None
+        return YOLO(target_path), None
     else:
-        from transformers import AutoProcessor, AutoModel
-        processor = AutoProcessor.from_pretrained(LOCATEANYTHING_ID, trust_remote_code=True)
-        model = AutoModel.from_pretrained(
-            LOCATEANYTHING_ID,
+        target_id = model_override_path if model_override_path else LOCATEANYTHING_ID
+        print(f"Loading Model Setup [{MODEL_TYPE.upper()}: {target_id}]...")
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        processor = AutoProcessor.from_pretrained(target_id, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            target_id,
             trust_remote_code=True,
-            torch_dtype=cfg["DTYPE"],
-            attn_implementation="sdpa",
-        )
-
-        for obj in [model, getattr(model, "language_model", None),
-                    getattr(getattr(model, "language_model", None), "model", None)]:
-            if obj and hasattr(obj, "_attn_implementation"):
-                obj._attn_implementation = "sdpa"
-            if obj and hasattr(obj, "config") and hasattr(obj.config, "_attn_implementation"):
-                obj.config._attn_implementation = "sdpa"
-
-        if cfg["DEVICE"] == "cuda":
-            model = model.to("cuda")
-        model.eval()
-        print("✅ LocateAnything-3B loaded successfully.")
+            torch_dtype=cfg["DTYPE"]
+        ).to(cfg["DEVICE"])
         return model, processor
 
 
-# ─── SHARED HELPERS ─────────────────────────────────────────────────────────
-def clean_label(label: str) -> str:
-    label = label.strip().lower()
-    if not label:
-        return "weed"
-    for word in ["brome", "weed", "chickweed"]:
-        if word in label:
-            return word
-    n = len(label)
-    for unit_len in range(1, n//2 + 2):
-        unit = label[:unit_len]
-        if unit * (n // unit_len) in label:
-            return unit if len(unit) >= 3 else label
-    return label
-
-
-def to_ros_detection(det: dict) -> dict:
-    """
-    Convert an internal detection dict (x1,y1,x2,y2,label,[confidence]) into
-    the flat schema consumed downstream by the ROS2 integration:
-        {class, centroid_x, centroid_y, bbox: {x1,y1,x2,y2}, confidence}
-
-    centroid_x/centroid_y are pixel coordinates in the image frame (the
-    midpoint of the bounding box), since that's what the robot's targeting
-    logic expects.
-    """
-    x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-    return {
-        "class": det.get("label", "weed"),
-        "centroid_x": (x1 + x2) // 2,
-        "centroid_y": (y1 + y2) // 2,
-        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-        "confidence": det.get("confidence"),  # None for LocateAnything (no native confidence score)
-    }
-
-
-def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray:
-    annotated = image_bgr.copy()
-    for i, det in enumerate(detections):
-        x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-        label = f"{det.get('label', 'weed')} #{i+1}"
-
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, BOX_THICKNESS)
-
-        (tw, th), _ = cv2.getTextSize(label, FONT, FONT_SCALE, 1)
-        cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), BOX_COLOR, -1)
-        cv2.putText(annotated, label, (x1 + 2, y1 - 4), FONT, FONT_SCALE, (0, 0, 0), 1)
-
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        cv2.circle(annotated, (cx, cy), 6, (0, 0, 255), -1)
-        cv2.circle(annotated, (cx, cy), 8, (0, 255, 255), 2)
-
-        coord_text = f"({cx},{cy})"
-        (twc, _), _ = cv2.getTextSize(coord_text, FONT, 0.5, 1)
-        text_y = cy + 25 if cy < annotated.shape[0] - 40 else cy - 15
-        cv2.putText(annotated, coord_text, (cx - twc//2, text_y), FONT, 0.5, (0, 0, 255), 1)
-
-    cv2.putText(annotated, f"Weeds detected: {len(detections)}", (10, 30),
-                FONT, 0.9, (0, 255, 255), 2)
-    return annotated
-
-
-# ─── YOLO DETECTION ─────────────────────────────────────────────────────────
-def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.25, verbose=False)[0]
+# ─── INFERENCE: YOLO ─────────────────────────────────────────────────────────
+def detect_with_yolo(pil_image: Image.Image, model) -> tuple[list[dict], str]:
+    img_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    results = model(img_cv, verbose=False)
+    
     detections = []
-    for box in results.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+    if not results:
+        return detections, "No results returned"
+        
+    res = results[0]
+    names = res.names
+    
+    for box in res.boxes:
+        coords = box.xyxy[0].tolist()
+        x1, y1, x2, y2 = map(int, coords)
         conf = float(box.conf[0])
-        cls = int(box.cls[0])
-        label = results.names[cls]
-        detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": conf})
-    return detections, str(results)
+        cls_id = int(box.cls[0])
+        class_name = names.get(cls_id, f"UNKNOWN_{cls_id}")
+        
+        detections.append({
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "confidence": conf,
+            "label": class_name
+        })
+        
+    return detections, str(res)
 
 
-# ─── LOCATEANYTHING HELPERS ─────────────────────────────────────────────────
-def filter_detections(detections, img_w, img_h):
-    img_area = img_w * img_h
-    min_area = MIN_BOX_AREA_FRACTION * img_area
-    sized = [(max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]), d) for d in detections 
-             if max(0, d["x2"]-d["x1"])*max(0, d["y2"]-d["y1"]) >= min_area]
-    sized.sort(key=lambda x: x[0], reverse=True)
-    accepted = []
-    for _, det in sized:
-        if not any((min(det["x2"], k["x2"]) - max(det["x1"], k["x1"])) * 
-                   (min(det["y2"], k["y2"]) - max(det["y1"], k["y1"])) / 
-                   max(1e-6, (det["x2"]-det["x1"])*(det["y2"]-det["y1"])) >= CONTAINMENT_THRESHOLD 
-                   for k in accepted):
-            accepted.append(det)
-    return accepted
-
-
-def apply_nms(detections, iou_threshold=0.45):
-    if len(detections) <= 1:
-        return detections
-    boxes = np.array([[d["x1"], d["y1"], d["x2"], d["y2"]] for d in detections])
-    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-    order = areas.argsort()[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(boxes[i, 0], boxes[order[1:], 0])
-        yy1 = np.maximum(boxes[i, 1], boxes[order[1:], 1])
-        xx2 = np.minimum(boxes[i, 2], boxes[order[1:], 2])
-        yy2 = np.minimum(boxes[i, 3], boxes[order[1:], 3])
-        w = np.maximum(0.0, xx2 - xx1)
-        h = np.maximum(0.0, yy2 - yy1)
-        inter = w * h
-        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
-        inds = np.where(ovr <= iou_threshold)[0]
-        order = order[inds + 1]
-    return [detections[i] for i in keep]
-
-
-def parse_boxes(response_text: str, img_w: int, img_h: int):
-    detections = []
-    ref_blocks = re.findall(r'<ref>(.*?)</ref>((?:<box>(?:<\d+>){4}</box>)+)', response_text, re.DOTALL)
-    for label, raw in ref_blocks:
-        label = clean_label(label)
-        raw_boxes = re.findall(r'<box><(\d+)><(\d+)><(\d+)><(\d+)></box>', raw)
-        last_box = None
-        for bx in raw_boxes:
-            x1n, y1n, x2n, y2n = map(int, bx)
-            if last_box == (x1n, y1n, x2n, y2n):
-                continue
-            last_box = (x1n, y1n, x2n, y2n)
-            x1 = int(x1n / 1000 * img_w)
-            y1 = int(y1n / 1000 * img_h)
-            x2 = int(x2n / 1000 * img_w)
-            y2 = int(y2n / 1000 * img_h)
-            detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-    filtered = filter_detections(detections, img_w, img_h)
-    return apply_nms(filtered)
-
-
-def detect_with_locateanything(image: Image.Image, model, processor, prompt: str):
-    img_w, img_h = image.size
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-
-    text_input = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    inputs = processor(text=text_input, images=[image], return_tensors="pt").to(cfg["DEVICE"])
+# ─── INFERENCE: LOCATEANYTHING ───────────────────────────────────────────────
+def detect_with_locateanything(pil_image: Image.Image, model, processor, prompt: str) -> tuple[list[dict], str]:
+    w, h = pil_image.size
+    
+    inputs = processor(images=pil_image, text=prompt, return_tensors="pt")
+    inputs = {k: v.to(cfg["DEVICE"]) for k, v in inputs.items()}
+    if "pixel_values" in inputs:
+        inputs["pixel_values"] = inputs["pixel_values"].to(cfg["DTYPE"])
 
     with torch.no_grad():
-        output = model.generate(
+        generated_ids = model.generate(
             **inputs,
-            tokenizer=processor.tokenizer,
-            use_cache=True,
             max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
             repetition_penalty=REPETITION_PENALTY,
             no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+            do_sample=False
         )
 
-    if isinstance(output, str):
-        raw_text = output
-    else:
-        raw_text = processor.decode(output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    generated_text = processor.decode(generated_ids[0], skip_special_tokens=True)
+    
+    pattern = r"([^\[,\n]+)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]"
+    matches = re.findall(pattern, generated_text)
+    
+    detections = []
+    for match in matches:
+        label = match[0].strip()
+        y1 = int(float(match[1]) / 1000.0 * h)
+        x1 = int(float(match[2]) / 1000.0 * w)
+        y2 = int(float(match[3]) / 1000.0 * h)
+        x2 = int(float(match[4]) / 1000.0 * w)
+        
+        detections.append({
+            "x1": min(x1, x2), "y1": min(y1, y2),
+            "x2": max(x1, x2), "y2": max(y1, y2),
+            "confidence": 1.0,
+            "label": label
+        })
+        
+    return detections, generated_text
 
-    detections = parse_boxes(raw_text, img_w, img_h)
-    return detections, raw_text
+
+# ─── BOUNDING BOX GEOMETRY POST-PROCESSING ───────────────────────────────────
+def post_process_detections(detections: list[dict], img_w: int, img_h: int) -> list[dict]:
+    valid = []
+    img_area = img_w * img_h
+    
+    for d in detections:
+        box_area = (d["x2"] - d["x1"]) * (d["y2"] - d["y1"])
+        if (box_area / img_area) >= MIN_BOX_AREA_FRACTION:
+            valid.append(d)
+            
+    valid = sorted(valid, key=lambda x: (x["x2"] - x["x1"]) * (x["y2"] - x["y1"]), reverse=True)
+    keep = []
+    
+    for i, box in enumerate(valid):
+        is_contained = False
+        b_area = (box["x2"] - box["x1"]) * (box["y2"] - box["y1"])
+        
+        for accepted in keep:
+            ix1 = max(box["x1"], accepted["x1"])
+            iy1 = max(box["y1"], accepted["y1"])
+            ix2 = min(box["x2"], accepted["x2"])
+            iy2 = min(box["y2"], accepted["y2"])
+            
+            if ix2 > ix1 and iy2 > iy1:
+                inter_area = (ix2 - ix1) * (iy2 - iy1)
+                if (inter_area / b_area) > CONTAINMENT_THRESHOLD:
+                    is_contained = True
+                    break
+        if not is_contained:
+            keep.append(box)
+            
+    return keep
 
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
-def process_folder(input_dir: str, output_dir: str, model, processor=None):
-    input_path = Path(input_dir)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+# ─── VISUALIZATION GRAPHICS FUNCTION ─────────────────────────────────────────
+def save_annotated_image(img_path: Path, ros_detections: list[dict]):
+    """Draws green bounding boxes and matching green high-contrast tracking strings on verification frames."""
+    img_cv = cv2.imread(str(img_path))
+    if img_cv is None:
+        return
+        
+    BOX_COLOR = (0, 255, 0)       # Bright Green boundary
+    TEXT_COLOR = (0, 255, 0)      # Bright Green text labels
+    BG_CUSHION = (255, 255, 255)  # White background fill backdrop block
+    
+    for d in ros_detections:
+        bbox = d["bbox"]
+        cx, cy = d["centroid_x"], d["centroid_y"]
+        
+        # 1. Draw boundary box
+        cv2.rectangle(img_cv, (bbox["x1"], bbox["y1"]), (bbox["x2"], bbox["y2"]), BOX_COLOR, 2)
+        
+        # 2. Draw centroid tracker crosshair tags
+        cv2.circle(img_cv, (cx, cy), 6, (0, 0, 255), -1)
+        cv2.circle(img_cv, (cx, cy), 2, (255, 255, 255), -1)
+        
+        # 3. Handle high-contrast text overlays
+        label_str = f"{d['class']} ({d['confidence']:.2f}) [Cx:{cx}, Cy:{cy}]"
+        
+        # Compute exact pixel space dimensions of the string block
+        (tw, th), baseline = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        
+        text_x = bbox["x1"]
+        text_y = bbox["y1"] - 8 if bbox["y1"] - 8 > th + baseline else bbox["y1"] + th + 8
+        
+        # Render backdrop contrast anchor box
+        cv2.rectangle(
+            img_cv, 
+            (text_x, text_y - th - 4), 
+            (text_x + tw + 4, text_y + baseline), 
+            BG_CUSHION, 
+            -1
+        )
+        
+        # Lay text string cleanly over the cushion
+        cv2.putText(
+            img_cv, 
+            label_str, 
+            (text_x + 2, text_y - 2),
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.6, 
+            TEXT_COLOR, 
+            1, 
+            cv2.LINE_AA
+        )
+                    
+    out_path = OUTPUT_DIR / f"detected_{img_path.name}"
+    cv2.imwrite(str(out_path), img_cv)
 
-    image_files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
-    prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all brome plants separately."
 
-    print(f"Model Type: {MODEL_TYPE} | Save Annotated Images: {SAVE_ANNOTATED_IMAGES}\n")
+# ─── MAIN ROS2 COMPATIBLE EXECUTOR ───────────────────────────────────────────
+def main():
+    # Production utilizes default configurations (e.g. ep30 weights)
+    model, processor = load_model()
+    
+    image_files = sorted(f for f in INPUT_DIR.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
+    prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all individual weed plants."
 
-    all_results = []
+    print(f"Target Images: {len(image_files)} found in {INPUT_DIR}")
+    
+    output_results = []
+
     for idx, img_path in enumerate(image_files):
         print(f"[{idx+1}/{len(image_files)}] Processing: {img_path.name}")
-
+        
         pil_image = Image.open(img_path).convert("RGB")
-        bgr_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-
-        t_start = time.time()
-
+        img_w, img_h = pil_image.size
+        
+        t0 = time.time()
         if MODEL_TYPE == "yolo":
-            detections, raw_text = detect_with_yolo(pil_image, model)
+            detections, raw_output = detect_with_yolo(pil_image, model)
         else:
-            detections, raw_text = detect_with_locateanything(pil_image, model, processor, prompt)
+            detections, raw_output = detect_with_locateanything(pil_image, model, processor, prompt)
+        elapsed = time.time() - t0
 
-        elapsed = time.time() - t_start
+        filtered_detections = post_process_detections(detections, img_w, img_h)
 
-        print(f"  → {len(detections)} weed(s) detected ({elapsed:.1f}s)")
+        # Structure normalized coordinate targets explicitly for downstream ROS nodes
+        ros_detections = []
+        for d in filtered_detections:
+            cx = int(round((d["x1"] + d["x2"]) / 2.0))
+            cy = int(round((d["y1"] + d["y2"]) / 2.0))
+            
+            ros_detections.append({
+                "class": d["label"].strip().upper(),
+                "centroid_x": cx,
+                "centroid_y": cy,
+                "bbox": {
+                    "x1": d["x1"],
+                    "y1": d["y1"],
+                    "x2": d["x2"],
+                    "y2": d["y2"]
+                },
+                "confidence": d["confidence"]
+            })
 
-        if SAVE_ANNOTATED_IMAGES:
-            annotated = draw_detections(bgr_image, detections)
-            out_path = output_path / f"detected_{img_path.stem}.jpg"
-            cv2.imwrite(str(out_path), annotated)
-            print(f"  → Saved annotated image")
+        # Check configuration value
+        if VISUALIZE_DETECTIONS:
+            save_annotated_image(img_path, ros_detections)
 
-        all_results.append({
+        output_results.append({
             "image": img_path.name,
-            "weed_count": len(detections),
-            "detections": [to_ros_detection(d) for d in detections],
-            "raw_output": raw_text[:500],
-            "inference_time_seconds": round(elapsed, 2),
+            "weed_count": len(ros_detections),
+            "detections": ros_detections,
+            "raw_output": raw_output[:500],
+            "inference_time_seconds": round(elapsed, 2)
         })
 
-        print(f"  → Detection data saved\n")
-
-    # Save model-specific detections.json
-    base_name = "yolo" if MODEL_TYPE == "yolo" else "locateanything"
-    detections_file = RESULTS_ROOT / f"{base_name}_detections.json"
-
-    config_info = {
-        "model_type": MODEL_TYPE,
-        "save_annotated_images": SAVE_ANNOTATED_IMAGES,
-        "device": cfg["DEVICE"],
-        "dtype": str(cfg["DTYPE"]).replace("torch.", "")
+    # Save detections payload to configured results path (project root by default)
+    final_output_file = RESULTS_FILE
+    
+    final_payload = {
+        "config": {
+            "model_type": MODEL_TYPE,
+            "save_annotated_images": VISUALIZE_DETECTIONS,
+            "device": cfg["DEVICE"],
+            "dtype": str(cfg["DTYPE"]).replace("torch.", "")
+        },
+        "results": output_results
     }
 
-    if MODEL_TYPE == "locateanything":
-        config_info.update({
-            "prompt": prompt,
-            "min_box_area_fraction": MIN_BOX_AREA_FRACTION,
-            "containment_threshold": CONTAINMENT_THRESHOLD,
-            "max_new_tokens": MAX_NEW_TOKENS,
-            "repetition_penalty": REPETITION_PENALTY,
-            "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
-        })
+    with open(final_output_file, "w", encoding="utf-8") as f:
+        json.dump(final_payload, f, indent=2)
 
-    with open(detections_file, "w", encoding="utf-8") as f:
-        json.dump({
-            "config": config_info,
-            "results": all_results
-        }, f, indent=2)
-
-    print(f"✅ Pipeline completed!")
-    print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
+    print(f"\n✅ Detection completed safely. Structured payload exported to: {final_output_file}")
 
 
 if __name__ == "__main__":
-    model, processor = load_model()
-    process_folder(INPUT_DIR, OUTPUT_DIR, model, processor)
+    main()
