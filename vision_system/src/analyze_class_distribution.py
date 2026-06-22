@@ -1,23 +1,14 @@
 """
-ONE-TIME SCRIPT: Analyze class distribution across train/val/test splits.
+ONE-TIME SCRIPT: Analyze class distribution across the training split.
 ---------------------------------------------------------------------------
-Reads YOLO-format label .txt files (class_id x_center y_center width height)
-under labels/train, labels/val, labels/test and reports how many instances
-of each class appear in each split. Useful for spotting class imbalance
-before training (e.g. one weed species dominating the dataset).
+Reads YOLO-format label .txt files under labels/train and evaluates:
+1. Training Image Distribution (Unique images containing classes vs empty backgrounds)
+2. Training Instance Distribution (Total individual objects of the class)
 
-Not part of the live detection/training pipeline — run standalone whenever
-you want to re-check the dataset.
+Displays both metrics side-by-side using clean ring/donut charts.
 
 Run from vision_system/:
     python src/analyze_class_distribution.py
-
-Expects (Ultralytics standard layout):
-    labels/train/*.txt
-    labels/val/*.txt
-    labels/test/*.txt
-Class names are read from config/data.yaml so output uses class codes
-(e.g. BROST) rather than bare IDs.
 """
 
 import sys
@@ -31,114 +22,159 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_YAML_PATH = PROJECT_ROOT / "config" / "data.yaml"
 
-# Splits to analyze and where their label folders live, relative to the
-# dataset root declared in data.yaml ("path:" + "train:"/"val:"/"test:",
-# with "images" swapped for "labels").
-SPLITS = ["train", "val", "test"]
-
 OUTPUT_CHART = PROJECT_ROOT / "class_distribution.png"
 
 
-def load_class_names() -> dict:
+def load_class_names() -> tuple[dict, dict]:
     with open(DATA_YAML_PATH, "r", encoding="utf-8") as f:
         data_cfg = yaml.safe_load(f)
-    return {int(k): v for k, v in data_cfg["names"].items()}, data_cfg
+    return data_cfg.get("names", {}), data_cfg
 
 
-def resolve_label_dir(data_cfg: dict, split: str) -> Path:
-    """Convert the images/<split> path from data.yaml into labels/<split>."""
+def resolve_train_label_dir(data_cfg: dict) -> Path:
     dataset_root = (DATA_YAML_PATH.parent / data_cfg["path"]).resolve()
-    images_rel = data_cfg.get(split)
-    if not images_rel:
-        return None
-    images_dir = (dataset_root / images_rel).resolve()
-    labels_dir = Path(str(images_dir).replace("images", "labels", 1))
-    return labels_dir
+    split_rel_path = data_cfg.get("train", "images/train")
+    img_dir = (dataset_root / split_rel_path).resolve()
+    
+    label_dir = Path(str(img_dir).replace("images", "labels", 1))
+    return label_dir
 
 
-def count_classes_in_split(label_dir: Path) -> Counter:
-    """Count class instances (one count per bounding box line) in a split."""
-    counts = Counter()
-    if not label_dir or not label_dir.exists():
-        return counts
+def analyze_training_split(label_dir: Path) -> tuple[Counter, Counter, int]:
+    """
+    Computes unique image counts per class (including a separate count for empty background images)
+    and total instance counts per class strictly inside the training partition.
+    """
+    instance_counts = Counter()
+    image_counts = Counter()
+    empty_background_count = 0
+
+    if not label_dir.exists():
+        return image_counts, instance_counts, empty_background_count
 
     for txt_file in label_dir.glob("*.txt"):
-        with open(txt_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
+        try:
+            with open(txt_file, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+                
+            if not lines:
+                # File is empty -> Explicit background sample
+                empty_background_count += 1
+                continue
+
+            classes_in_this_image = set()
+            for line in lines:
                 parts = line.split()
-                if len(parts) != 5:
-                    continue
-                try:
+                if parts:
                     class_id = int(parts[0])
-                except ValueError:
-                    continue
-                counts[class_id] += 1
+                    instance_counts[class_id] += 1
+                    classes_in_this_image.add(class_id)
+            
+            # Record unique image presence per weed class
+            for class_id in classes_in_this_image:
+                image_counts[class_id] += 1
+                
+        except Exception as e:
+            print(f"Error reading {txt_file.name}: {e}")
+            
+    return image_counts, instance_counts, empty_background_count
 
-    return counts
 
-
-def print_table(counts_by_split: dict, class_names: dict):
-    all_class_ids = sorted(set().union(*[c.keys() for c in counts_by_split.values()]))
-
-    if not all_class_ids:
-        print("No labeled instances found in any split.")
+def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instance_counts: Counter, 
+                                  empty_background_count: int, class_names: dict, output_path: Path):
+    """Generates a side-by-side subplot figure displaying both ring charts."""
+    if not image_counts and not instance_counts and empty_background_count == 0:
+        print("❌ Error: No training data found. Cannot generate charts.")
         return
 
-    name_width = max(len(class_names.get(cid, f"id_{cid}")) for cid in all_class_ids)
-    name_width = max(name_width, len("Class"))
+    # Create a unified high-resolution figure with two side-by-side subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9), facecolor="white")
+    
+    # Generate an adaptive color map palette based on the total number of unique classes found
+    unique_classes = sorted(list(set(image_counts.keys()).union(set(instance_counts.keys()))))
+    color_cycle = plt.cm.tab20(np.linspace(0, 1, len(unique_classes) + 1)) # +1 to save a color slot for background
+    
+    class_color_map = {cid: color_cycle[i] for i, cid in enumerate(unique_classes)}
+    background_color = '#95a5a6'  # Neutral elegant grey for empty background samples
 
-    header = f"{'Class':<{name_width}}  " + "  ".join(f"{s:>8}" for s in SPLITS) + f"  {'Total':>8}"
-    print(header)
-    print("-" * len(header))
+    # Helper to generate labeling text format string: displays "Count\n(Pct%)" or stays empty if slice is tiny
+    def make_autopct_with_values(total_sum):
+        def inner_autopct(pct):
+            if pct < 1.5:  # Hides labels on small slices to avoid overlapping text
+                return ''
+            val = int(round(pct * total_sum / 100.0))
+            return f"{val:,}\n({pct:.1f}%)"
+        return inner_autopct
 
-    split_totals = {s: 0 for s in SPLITS}
-    for cid in all_class_ids:
-        name = class_names.get(cid, f"id_{cid}")
-        row_counts = [counts_by_split[s].get(cid, 0) for s in SPLITS]
-        row_total = sum(row_counts)
-        for s, c in zip(SPLITS, row_counts):
-            split_totals[s] += c
-        row = f"{name:<{name_width}}  " + "  ".join(f"{c:>8}" for c in row_counts) + f"  {row_total:>8}"
-        print(row)
+    # Calculate actual total text files found on disk to verify data matches perfectly
+    actual_total_files = len(list(label_dir.glob("*.txt")))
 
-    print("-" * len(header))
-    totals_row = f"{'TOTAL':<{name_width}}  " + "  ".join(f"{split_totals[s]:>8}" for s in SPLITS) \
-                 + f"  {sum(split_totals.values()):>8}"
-    print(totals_row)
+    # ─── LEFT SUBPLOT: IMAGE DISTRIBUTION (Includes Background) ─────────────
+    img_sorted = image_counts.most_common()
+    img_cids = [item[0] for item in img_sorted]
+    img_sizes = [item[1] for item in img_sorted]
+    img_labels = [class_names.get(cid, f"Class {cid}") for cid in img_cids]
+    img_colors = [class_color_map[cid] for cid in img_cids]
 
-    print(f"\nImages with zero labeled instances (empty .txt files) are not "
-          f"counted above — they represent 'no weeds present' images.")
+    # Append the explicit Background class if background files are present
+    if empty_background_count > 0:
+        img_labels.append("BACKGROUND (Empty)")
+        img_sizes.append(empty_background_count)
+        img_colors.append(background_color)
 
+    total_imgs_sum = sum(img_sizes)
 
-def plot_chart(counts_by_split: dict, class_names: dict, output_path: Path):
-    all_class_ids = sorted(set().union(*[c.keys() for c in counts_by_split.values()]))
-    if not all_class_ids:
-        print("Skipping chart: no labeled instances to plot.")
-        return
+    wedges1, texts1, autotexts1 = ax1.pie(
+        img_sizes,
+        labels=img_labels,
+        autopct=make_autopct_with_values(total_imgs_sum),
+        startangle=140,
+        colors=img_colors,
+        pctdistance=0.72,
+        labeldistance=1.08,
+        wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
+    )
+    ax1.set_title(f"Training Dataset Image Distribution\n(Total Disk Files: {actual_total_files:,} | Sum of Slices: {total_imgs_sum:,})", 
+                  fontsize=13, weight='bold', pad=15, color='#2c3e50')
+    ax1.axis('equal')
 
-    labels = [class_names.get(cid, f"id_{cid}") for cid in all_class_ids]
-    x = np.arange(len(labels))
-    bar_width = 0.25
+    # ─── RIGHT SUBPLOT: INSTANCE DISTRIBUTION (Objects Only) ────────────────
+    inst_sorted = instance_counts.most_common()
+    inst_cids = [item[0] for item in inst_sorted]
+    inst_sizes = [item[1] for item in inst_sorted]
+    inst_labels = [class_names.get(cid, f"Class {cid}") for cid in inst_cids]
+    inst_colors = [class_color_map[cid] for cid in inst_cids]
+    total_inst_sum = sum(inst_sizes)
 
-    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.5), 6))
+    wedges2, texts2, autotexts2 = ax2.pie(
+        inst_sizes,
+        labels=inst_labels,
+        autopct=make_autopct_with_values(total_inst_sum),
+        startangle=140,
+        colors=inst_colors,
+        pctdistance=0.72,
+        labeldistance=1.08,
+        wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
+    )
+    ax2.set_title(f"Training Dataset Instance Distribution\n(Total Labeled Object Boxes: {total_inst_sum:,})", 
+                  fontsize=13, weight='bold', pad=15, color='#2c3e50')
+    ax2.axis('equal')
 
-    for i, split in enumerate(SPLITS):
-        values = [counts_by_split[split].get(cid, 0) for cid in all_class_ids]
-        offset = (i - 1) * bar_width
-        ax.bar(x + offset, values, bar_width, label=split)
+    # ─── STYLING & AESTHETICS ───────────────────────────────────────────────
+    for t in texts1 + texts2:
+        t.set_color('#34495e')
+        t.set_fontsize(9.5)
+    for at in autotexts1 + autotexts2:
+        at.set_color('white')
+        at.set_weight('bold')
+        at.set_fontsize(8.5)
 
-    ax.set_xlabel("Class")
-    ax.set_ylabel("Instance count")
-    ax.set_title("Class Distribution by Split")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.legend()
-    fig.tight_layout()
+    plt.suptitle("AI-Sprayer Pipeline: Labeled Training Split Overview Matrix", 
+                 fontsize=16, weight='bold', y=0.98, color='#2c3e50')
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=150)
-    print(f"\nChart saved to: {output_path}")
+    print(f"\n📊 Dual-donut distribution overview saved successfully to: {output_path}")
 
 
 def main():
@@ -147,19 +183,20 @@ def main():
         sys.exit(1)
 
     class_names, data_cfg = load_class_names()
+    label_dir = resolve_train_label_dir(data_cfg)
 
-    counts_by_split = {}
-    for split in SPLITS:
-        label_dir = resolve_label_dir(data_cfg, split)
-        counts = count_classes_in_split(label_dir)
-        counts_by_split[split] = counts
-        found_msg = f"{label_dir}" if label_dir and label_dir.exists() else f"{label_dir} (not found)"
-        print(f"{split}: {sum(counts.values())} instances across "
-              f"{len(list(label_dir.glob('*.txt'))) if label_dir and label_dir.exists() else 0} label files  [{found_msg}]")
+    print("=" * 70)
+    print(f"Analyzing Training Split Distribution Profiles from: {label_dir.name}")
+    print("=" * 70)
 
-    print()
-    print_table(counts_by_split, class_names)
-    plot_chart(counts_by_split, class_names, OUTPUT_CHART)
+    image_counts, instance_counts, empty_background_count = analyze_training_split(label_dir)
+
+    actual_total_files = len(list(label_dir.glob('*.txt')))
+    print(f"  -> Total Label Files on Disk: {actual_total_files:,}")
+    print(f"  -> Explicit Background (Empty Files): {empty_background_count:,}")
+    print(f"  -> Total Labeled Bounding Boxes: {sum(instance_counts.values()):,}")
+
+    save_dual_distribution_donuts(label_dir, image_counts, instance_counts, empty_background_count, class_names, OUTPUT_CHART)
 
 
 if __name__ == "__main__":
