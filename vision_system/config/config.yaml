@@ -6,7 +6,7 @@
 # ============================================================================
 
 
-model:   # Used for weed_detection inference. See train_config.yaml for training-specific settings.
+model:   # Used for weed_detection inference only. See train_config.yaml for training-specific settings.
   model_type: "yolo"        # Options: "locateanything" or "yolo"
   locateanything_id: "nvidia/LocateAnything-3B"   # Only used for LocateAnything
   yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep30_b4_lr0.0002/weights/best.pt'  # Only used for YOLO
@@ -80,7 +80,7 @@ visualization:
 # Evaluation Configuration (Independent Execution)
 # ============================================================================
 evaluation:
-  eval_model_type: "yolo"        # Options: "yolo" or "locateanything"
+  eval_model_type: "locateanything"        # Options: "yolo" or "locateanything"
   
   # Specify the exact fine-tuned model weights or ID you want to test:
   eval_yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep20_b8_lr0.0004/weights/best.pt'
