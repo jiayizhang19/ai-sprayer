@@ -24,9 +24,9 @@ model:
 
 training:
   epochs: 150
-  image_size: 640
-  batch_size: 6          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
-  device: "cpu"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
+  image_size: 800
+  batch_size: 8          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
+  device: "0"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
   optimizer: "AdamW"      # use "auto" to let Ultralytics choose, but lr0/momentum will be ignored
   lr0: 0.001             # initial learning rate used when optimizer is not "auto"
   momentum: 0.937           # optimizer momentum used when supported
