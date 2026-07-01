@@ -83,7 +83,7 @@ evaluation:
   eval_model_type: "yolo"        # Options: "yolo" or "locateanything"
   
   # Specify the exact fine-tuned model weights or ID you want to test:
-  eval_yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep40_b8_lr0.0004/weights/best.pt'
+  eval_yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8s_ep100_b8_lr0.0012/weights/best.pt'
   # eval_yolo_model: 'D:/MyProjects/AI-Sprayer/yolov8n.pt'
   eval_locateanything_id: "nvidia/LocateAnything-3B"
 
