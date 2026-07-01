@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 images/
 labels/
-*.pt
+# *.pt
 weed_images/
 weed_detections/
 gt_verification/
