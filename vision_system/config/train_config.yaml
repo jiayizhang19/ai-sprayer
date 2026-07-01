@@ -12,7 +12,7 @@ model:
   # Base checkpoint to fine-tune from. Using pretrained COCO weights gives
   # the model a head start (edges, shapes, textures) vs. training from
   # scratch, even though none of the COCO classes are weeds.
-  base_weights: "yolov8s.pt" # "yolov8n.pt" is smaller and faster, but less accurate. "yolov8s.pt" is a good balance of speed and accuracy.
+  base_weights: "yolov8m.pt" # "yolov8n.pt" is smaller and faster, but less accurate. "yolov8s.pt" is a good balance of speed and accuracy.
 
   # Where the final best.pt and training run artifacts are saved.
   project_dir: "runs/train"
@@ -49,14 +49,14 @@ augmentation:
   hsv_h: 0.015    # hue
   hsv_s: 0.7      # saturation
   hsv_v: 0.4      # brightness
-  degrees: 10.0   # rotation
+  degrees: 10.0   # rotation, less rotation is better for the model learning consistent weed shapes
   translate: 0.1
   scale: 0.5
   fliplr: 0.5     # horizontal flip probability
   flipud: 0.0     # vertical flip probability (usually 0 for ground-view crops)
-  mosaic: 0.8     # mosaic augmentation probability
+  mosaic: 0.8     # mosaic augmentation probability, lower the number for less aggressive augmentation, better for plant shape recognition
 
 validation:
   # IoU threshold used when computing validation metrics during training.
   iou_threshold: 0.5
-  conf_threshold: 0.25
+  conf_threshold: 0.25 
