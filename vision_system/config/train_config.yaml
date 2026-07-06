@@ -27,6 +27,9 @@ training:
   image_size: 800
   batch_size: 8          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
   device: "0"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
+  image_size: 800
+  batch_size: 8          # lower this (e.g. 4-8) if you run out of CPU/GPU memory
+  device: "0"            # "cpu" or "0" for first GPU, "0,1" for multi-GPU
   optimizer: "AdamW"      # use "auto" to let Ultralytics choose, but lr0/momentum will be ignored
   lr0: 0.001             # initial learning rate used when optimizer is not "auto"
   momentum: 0.937           # optimizer momentum used when supported
@@ -49,14 +52,14 @@ augmentation:
   hsv_h: 0.015    # hue
   hsv_s: 0.7      # saturation
   hsv_v: 0.4      # brightness
-  degrees: 10.0   # rotation
+  degrees: 10.0   # rotation, less rotation is better for the model learning consistent weed shapes
   translate: 0.1
   scale: 0.5
   fliplr: 0.5     # horizontal flip probability
   flipud: 0.0     # vertical flip probability (usually 0 for ground-view crops)
-  mosaic: 0.8     # mosaic augmentation probability
+  mosaic: 0.8     # mosaic augmentation probability, lower the number for less aggressive augmentation, better for plant shape recognition
 
 validation:
   # IoU threshold used when computing validation metrics during training.
   iou_threshold: 0.5
-  conf_threshold: 0.25
+  conf_threshold: 0.25 

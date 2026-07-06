@@ -1,5 +1,5 @@
 """
-Modular Weed Detection Pipeline
+Modular Weed Detection Pipeline with Per-Class Thresholds
 """
 
 import sys
@@ -46,6 +46,14 @@ BOX_COLOR = cfg["BOX_COLOR"]
 BOX_THICKNESS = cfg["BOX_THICKNESS"]
 FONT = cfg["FONT"]
 FONT_SCALE = cfg["FONT_SCALE"]
+
+# Per-Class Thresholds
+PER_CLASS_THRESHOLDS = cfg.get("PER_CLASS_THRESHOLDS", {})
+DEFAULT_THRESHOLD = PER_CLASS_THRESHOLDS.get("DEFAULT", 0.25)
+
+def get_conf_threshold(label: str) -> float:
+    label_upper = str(label).strip().upper()
+    return PER_CLASS_THRESHOLDS.get(label_upper, DEFAULT_THRESHOLD)
 
 
 # ─── CLASS DISPLAY ──────────────────────────────────────────────────────────
@@ -99,7 +107,6 @@ def load_model():
             torch_dtype=cfg["DTYPE"],
         )
 
-        # Aggressive SDPA fix
         def force_sdpa(obj):
             if obj is None:
                 return
@@ -170,16 +177,26 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
     return annotated
 
 
-# ─── YOLO DETECTION ─────────────────────────────────────────────────────────
+# ─── YOLO DETECTION with Per-Class Threshold and Centroid ───────────────────
 def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.25, verbose=False)[0]
+    results = model(image, conf=0.1, verbose=False)[0]
     detections = []
     for box in results.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         conf = float(box.conf[0])
         cls = int(box.cls[0])
         label = results.names[cls]
-        detections.append({"label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": conf})
+        
+        if conf >= get_conf_threshold(label):
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            detections.append({
+                "label": label, 
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2, 
+                "confidence": conf,
+                "centroid_x": cx,
+                "centroid_y": cy
+            })
     return detections, str(results)
 
 
@@ -273,9 +290,85 @@ def detect_with_locateanything(image: Image.Image, model, processor, prompt: str
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 def process_folder(input_dir: str, output_dir: str, model, processor=None):
-    # (This function is not used by detection_evaluation.py, so it's kept minimal)
-    print("process_folder called - not used in evaluation mode.")
-    pass
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    image_files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
+    prompt = DETECTION_PROMPTS[0] if DETECTION_PROMPTS else "Locate all individual weed plants in this image."
+
+    print(f"Model Type: {MODEL_TYPE} | Save Annotated Images: {SAVE_ANNOTATED_IMAGES}\n")
+
+    all_results = []
+    for idx, img_path in enumerate(image_files):
+        print(f"[{idx+1}/{len(image_files)}] Processing: {img_path.name}")
+
+        pil_image = Image.open(img_path).convert("RGB")
+        bgr_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+        t_start = time.time()
+
+        if MODEL_TYPE == "yolo":
+            detections, raw_text = detect_with_yolo(pil_image, model)
+        else:
+            detections, raw_text = detect_with_locateanything(pil_image, model, processor, prompt)
+
+        elapsed = time.time() - t_start
+
+        print(f"  → {len(detections)} weed(s) detected ({elapsed:.1f}s)")
+
+        if SAVE_ANNOTATED_IMAGES:
+            annotated = draw_detections(bgr_image, detections)
+            out_path = output_path / f"detected_{img_path.stem}.jpg"
+            cv2.imwrite(str(out_path), annotated)
+            print(f"  → Saved annotated image")
+
+        all_results.append({
+            "image": img_path.name,
+            "weed_count": len(detections),
+            "detections": detections,
+            "raw_output": raw_text[:500],
+            "inference_time_seconds": round(elapsed, 2),
+        })
+
+        print(f"  → Detection data saved\n")
+
+    base_name = "yolo" if MODEL_TYPE == "yolo" else "locateanything"
+    detections_file = RESULTS_ROOT / f"{base_name}_detections.json"
+
+    config_info = {
+        "model_type": MODEL_TYPE,
+        "save_annotated_images": SAVE_ANNOTATED_IMAGES,
+        "device": cfg["DEVICE"],
+        "dtype": str(cfg["DTYPE"]).replace("torch.", ""),
+        "per_class_thresholds": PER_CLASS_THRESHOLDS
+    }
+
+    if MODEL_TYPE == "locateanything":
+        config_info.update({
+            "prompt": prompt,
+            "min_box_area_fraction": MIN_BOX_AREA_FRACTION,
+            "containment_threshold": CONTAINMENT_THRESHOLD,
+            "max_new_tokens": MAX_NEW_TOKENS,
+            "repetition_penalty": REPETITION_PENALTY,
+            "no_repeat_ngram_size": NO_REPEAT_NGRAM_SIZE,
+        })
+
+    with open(detections_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "config": config_info,
+            "results": all_results
+        }, f, indent=2)
+
+    print(f"✅ Pipeline completed!")
+    print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
+    all_results.append({
+            "image": img_path.name,
+            "weed_count": len(detections),
+            "detections": detections,
+            "raw_output": raw_text[:500] if MODEL_TYPE == "locateanything" else "",
+            "inference_time_seconds": round(elapsed, 2),
+        })
 
 
 if __name__ == "__main__":
