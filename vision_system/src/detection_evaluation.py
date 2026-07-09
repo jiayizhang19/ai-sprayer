@@ -30,17 +30,26 @@ import weed_detection  # Reused for loading & inference logic
 cfg = load_config()
 IMAGES_DIR = cfg["INPUT_DIR"]
 
+
 # Safely extract independent evaluation block from config.yaml
 with open(PROJECT_ROOT / "config" / "config.yaml", "r", encoding="utf-8") as f:
     raw_yaml = yaml.safe_load(f)
 
 eval_section = raw_yaml.get("evaluation", {})
 EVAL_MODEL_TYPE = eval_section.get("eval_model_type", "yolo").lower()
-EVAL_YOLO_MODEL = eval_section.get("eval_yolo_model", cfg["YOLO_MODEL"])
+
+# === Resolve eval_yolo_model relative to PROJECT_ROOT ===
+EVAL_YOLO_MODEL = eval_section.get("eval_yolo_model")
+if EVAL_YOLO_MODEL:
+    eval_path = Path(EVAL_YOLO_MODEL)
+    if not eval_path.is_absolute():
+        EVAL_YOLO_MODEL = str(PROJECT_ROOT / eval_path)
+else:
+    EVAL_YOLO_MODEL = cfg["YOLO_MODEL"]   # fallback
+
 EVAL_LOCATEANYTHING_ID = eval_section.get("eval_locateanything_id", cfg["LOCATEANYTHING_ID"])
 
-# Optional: tag which hardware this run was executed on (for side-by-side comparison
-# of eval_*_results.json files across laptop / Raspberry Pi / Jetson AGX later).
+# Optional: tag which hardware this run was executed on
 EVAL_PLATFORM = eval_section.get("eval_platform", "unspecified")
 
 # Hot-patch weed_detection config variables dynamically to respect the eval settings
@@ -409,8 +418,9 @@ def main():
     }
 
     # Generate files cleanly locally inside model_evaluation directory
-    json_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.json"
-    md_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.md"
+    platform_prefix = f"{EVAL_PLATFORM}_" if EVAL_PLATFORM and EVAL_PLATFORM != "unknown" else ""
+    json_file = RESULTS_ROOT / f"{platform_prefix}eval_{MODEL_EXP_NAME}_results.json"
+    md_file = RESULTS_ROOT / f"{platform_prefix}eval_{MODEL_EXP_NAME}_results.md"
 
     with open(json_file, "w", encoding="utf-8") as f:
         json.dump({
