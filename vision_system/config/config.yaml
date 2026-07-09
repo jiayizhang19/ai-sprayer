@@ -81,7 +81,7 @@ visualization:
 # ============================================================================
 evaluation:
   eval_model_type: "yolo"        # Options: "yolo" or "locateanything"
-  
+
   # Specify the exact fine-tuned model weights or ID you want to test:
   eval_yolo_model: 'D:/MyProjects/AI-Sprayer/vision_system/runs/train/yolov8n_ep150_b8_lr0.001/weights/best.pt'
   # eval_yolo_model: 'D:/MyProjects/AI-Sprayer/yolov8n.pt'
@@ -89,3 +89,9 @@ evaluation:
 
   # Set to true to generate and save verification frames with boxes & centroids.
   visualize_detections: false
+
+  # Label for which hardware this run was executed on. Free text — just keep it
+  # consistent across machines so results are easy to compare later, e.g.:
+  # "laptop", "raspberry_pi_5", "jetson_agx". Written into the eval JSON/MD output
+  # under experiment_config so you can diff runs across hardware side by side.
+  eval_platform: "laptop"

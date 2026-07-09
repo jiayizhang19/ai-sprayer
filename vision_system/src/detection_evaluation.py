@@ -3,10 +3,18 @@ Evaluation Script: Model vs Ground Truth (Independent Execution)
 -------------------------------------------------
 Runs independent live inference on images using a configured evaluation model,
 and scores the results against ground truth annotations.
+
+Timing additions:
+- Per-image inference time (the only directly measured quantity)
+- Overall aggregate: mean / median / std / FPS (with and without first-image warm-up)
+- Per-class-present grouping: mean image inference time for images containing each class
+  (this is image-level grouping, NOT per-detection/per-class timing — YOLO doesn't produce
+  a per-class inference cost since one forward pass predicts all classes at once)
 """
 
 import sys
 import json
+import time
 from pathlib import Path
 import yaml
 import numpy as np
@@ -30,6 +38,10 @@ eval_section = raw_yaml.get("evaluation", {})
 EVAL_MODEL_TYPE = eval_section.get("eval_model_type", "yolo").lower()
 EVAL_YOLO_MODEL = eval_section.get("eval_yolo_model", cfg["YOLO_MODEL"])
 EVAL_LOCATEANYTHING_ID = eval_section.get("eval_locateanything_id", cfg["LOCATEANYTHING_ID"])
+
+# Optional: tag which hardware this run was executed on (for side-by-side comparison
+# of eval_*_results.json files across laptop / Raspberry Pi / Jetson AGX later).
+EVAL_PLATFORM = eval_section.get("eval_platform", "unspecified")
 
 # Hot-patch weed_detection config variables dynamically to respect the eval settings
 weed_detection.MODEL_TYPE = EVAL_MODEL_TYPE
@@ -73,6 +85,7 @@ print(f"========================================================================
 print(f"Target Architecture: {EVAL_MODEL_TYPE.upper()}")
 print(f"Target Experiment:   {MODEL_EXP_NAME}")
 print(f"Target Model/Path:   {EVAL_YOLO_MODEL if EVAL_MODEL_TYPE == 'yolo' else EVAL_LOCATEANYTHING_ID}")
+print(f"Eval Platform:       {EVAL_PLATFORM}")
 print(f"Images Path:        {IMAGES_DIR}")
 print(f"Ground Truth Path:  {GT_LABELS_DIR}\n")
 
@@ -100,7 +113,7 @@ def label_matches_class(predicted_label: str, gt_class_code: str) -> bool:
 def load_ground_truth(image_name: str) -> list[dict]:
     stem = Path(image_name).stem.replace("detected_", "").replace("gt_", "")
     label_path = GT_LABELS_DIR / f"{stem}.txt"
-    
+
     if not label_path.exists():
         for p in GT_LABELS_DIR.glob("*.txt"):
             if stem in p.stem or p.stem in stem:
@@ -206,9 +219,10 @@ def match_detections(gt_boxes: list[dict], pred_boxes: list[dict], iou_thresh: f
 
 
 # ─── LOCAL REPORTING UTILITY ─────────────────────────────────────────────────
-def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn, 
-                          precision, recall, f1, mean_iou, per_image_metrics, 
-                          experiment_config, model_type, per_class_summary):
+def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
+                          precision, recall, f1, mean_iou, per_image_metrics,
+                          experiment_config, model_type, per_class_summary,
+                          timing_overall, timing_by_class_summary):
     """Generates local standalone markdown statistics without weed_detection dependencies."""
     lines = [
         f"# Evaluation Report: {model_type.upper()} ({MODEL_EXP_NAME})",
@@ -235,11 +249,35 @@ def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
             f"| {cls_code} | {metrics['tp']} | {metrics['fp']} | {metrics['fn']} | "
             f"{metrics['precision']:.4f} | {metrics['recall']:.4f} | {metrics['f1']:.4f} |"
         )
-    
+
+    lines.extend([
+        "",
+        "## Inference Timing — Overall",
+        f"- **Mean:** {timing_overall['mean_seconds']*1000:.1f} ms  "
+        f"({timing_overall['fps']:.2f} FPS)",
+        f"- **Median:** {timing_overall['median_seconds']*1000:.1f} ms",
+        f"- **Std Dev:** {timing_overall['std_seconds']*1000:.1f} ms",
+        f"- **Mean (excl. first image / warm-up):** "
+        f"{timing_overall['mean_seconds_excl_first']*1000:.1f} ms "
+        f"({timing_overall['fps_excl_first']:.2f} FPS)",
+        "",
+        "## Inference Timing — By Class Present in Image",
+        "_Note: this groups images by which ground-truth classes they contain; it is "
+        "the mean total inference time for images containing that class, not a "
+        "per-detection or per-class model cost (YOLO predicts all classes in a single "
+        "forward pass per image)._",
+        "",
+        "| Class Code | Mean Image Time (ms) | Images (n) |",
+        "|--- |--- |--- |",
+    ])
+    for cls_code, stats in timing_by_class_summary.items():
+        lines.append(f"| {cls_code} | {stats['mean_seconds']*1000:.1f} | {stats['n_images']} |")
+
     lines.extend([
         "",
         "## Setup Configuration Context",
         f"- **Model Identifier:** `{experiment_config.get('model_name')}`",
+        f"- **Eval Platform:** `{experiment_config.get('eval_platform')}`",
         f"- **Device Used:** `{experiment_config.get('device')}`",
         f"- **Data Type:** `{experiment_config.get('dtype')}`",
         ""
@@ -251,7 +289,7 @@ def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
 def main():
     # Load the requested model using weed_detection's backend structure
     model, processor = weed_detection.load_model()
-    
+
     image_files = sorted(f for f in IMAGES_DIR.iterdir() if f.suffix.lower() in cfg["SUPPORTED_EXTENSIONS"])
     prompt = cfg["DETECTION_PROMPTS"][0] if cfg["DETECTION_PROMPTS"] else "Locate all brome plants separately."
 
@@ -262,22 +300,25 @@ def main():
 
     for idx, img_path in enumerate(image_files):
         print(f"[{idx+1}/{len(image_files)}] Inferencing & Evaluating: {img_path.name}")
-        
+
         pil_image = Image.open(img_path).convert("RGB")
         img_w, img_h = pil_image.size
 
-        # Fetch predictions dynamically from the model instance
+        # ─── Timed inference call (the only directly measured quantity) ────
+        t0 = time.perf_counter()
         if EVAL_MODEL_TYPE == "yolo":
             detections, _ = weed_detection.detect_with_yolo(pil_image, model)
         else:
             detections, _ = weed_detection.detect_with_locateanything(pil_image, model, processor, prompt)
+        inference_time = time.perf_counter() - t0
+        print(f"  → inference: {inference_time*1000:.1f} ms")
 
         gt_norm = load_ground_truth(img_path.name)
         gt_boxes = [
             {"pixel_box": yolo_to_pixel(b, img_w, img_h), "class_code": b["class_code"]}
             for b in gt_norm
         ]
-        
+
         # Unify outputs into evaluation bounding format
         pred_boxes = [
             {
@@ -311,8 +352,33 @@ def main():
             "precision": metrics["precision"],
             "recall": metrics["recall"],
             "f1": f1,
-            "mean_iou_matched": np.mean(metrics["matched_ious"]) if metrics["matched_ious"] else 0.0
+            "mean_iou_matched": np.mean(metrics["matched_ious"]) if metrics["matched_ious"] else 0.0,
+            "inference_time_seconds": inference_time,
+            "gt_classes": sorted(set(b["class_code"] for b in gt_norm)),
         })
+
+    # ─── Timing aggregation ─────────────────────────────────────────────────
+    all_times = [m["inference_time_seconds"] for m in per_image_metrics]
+    warm_times = all_times[1:] if len(all_times) > 1 else all_times  # drop first-image warm-up
+
+    timing_overall = {
+        "mean_seconds": float(np.mean(all_times)) if all_times else 0.0,
+        "median_seconds": float(np.median(all_times)) if all_times else 0.0,
+        "std_seconds": float(np.std(all_times)) if all_times else 0.0,
+        "fps": float(1.0 / np.mean(all_times)) if all_times and np.mean(all_times) > 0 else 0.0,
+        "mean_seconds_excl_first": float(np.mean(warm_times)) if warm_times else 0.0,
+        "fps_excl_first": float(1.0 / np.mean(warm_times)) if warm_times and np.mean(warm_times) > 0 else 0.0,
+    }
+
+    # Per-class-present timing: mean image inference time for images containing each class
+    timing_by_class = {}
+    for m in per_image_metrics:
+        for cls in m["gt_classes"]:
+            timing_by_class.setdefault(cls, []).append(m["inference_time_seconds"])
+    timing_by_class_summary = {
+        cls: {"mean_seconds": float(np.mean(times)), "n_images": len(times)}
+        for cls, times in timing_by_class.items()
+    }
 
     # Summary performance processing
     per_class_summary = {}
@@ -336,11 +402,12 @@ def main():
     # Include parsed experiment name directly into configuration data structure
     experiment_config = {
         "model_name": MODEL_EXP_NAME,
+        "eval_platform": EVAL_PLATFORM,
         "device": cfg["DEVICE"],
         "dtype": str(cfg["DTYPE"]).replace("torch.", ""),
         "prompt": prompt if EVAL_MODEL_TYPE == "locateanything" else None
     }
-    
+
     # Generate files cleanly locally inside model_evaluation directory
     json_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.json"
     md_file = RESULTS_ROOT / f"eval_{MODEL_EXP_NAME}_results.md"
@@ -352,6 +419,8 @@ def main():
                 "precision": precision, "recall": recall, "f1": f1, "mean_iou": mean_iou,
                 "tp": total_tp, "fp": total_fp, "fn": total_fn, "total_gt": total_gt, "total_pred": total_pred
             },
+            "timing_overall": timing_overall,
+            "timing_by_class": timing_by_class_summary,
             "per_class": per_class_summary,
             "per_image": per_image_metrics
         }, f, indent=2)
@@ -359,7 +428,9 @@ def main():
     md_report = build_markdown_report(
         total_gt, total_pred, total_tp, total_fp, total_fn,
         precision, recall, f1, mean_iou, per_image_metrics, experiment_config, EVAL_MODEL_TYPE,
-        per_class_summary=per_class_summary
+        per_class_summary=per_class_summary,
+        timing_overall=timing_overall,
+        timing_by_class_summary=timing_by_class_summary,
     )
 
     with open(md_file, "w", encoding="utf-8") as f:
@@ -368,6 +439,8 @@ def main():
     print(f"\n✅ Independent evaluation completed successfully!")
     print(f"   → Metrics JSON: {json_file.name}")
     print(f"   → Summary Report MD: {md_file.name}")
+    print(f"   → Overall: {timing_overall['fps']:.2f} FPS "
+          f"({timing_overall['mean_seconds']*1000:.1f} ms/image mean)")
 
 
 if __name__ == "__main__":
