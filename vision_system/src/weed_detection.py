@@ -179,7 +179,7 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
 
 # ─── YOLO DETECTION with Per-Class Threshold and Centroid ───────────────────
 def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.1, verbose=False)[0]
+    results = model(image, conf=0.1, device=cfg["DEVICE"],verbose=False)[0]
     detections = []
     for box in results.boxes:
         conf = float(box.conf[0])
