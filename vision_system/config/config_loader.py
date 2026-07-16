@@ -37,7 +37,14 @@ def load_config(config_path: Path = CONFIG_PATH) -> dict:
     cfg["MODEL_TYPE"] = model_section["model_type"].lower()
 
     cfg["LOCATEANYTHING_ID"] = model_section.get("locateanything_id", "nvidia/LocateAnything-3B")
-    cfg["YOLO_MODEL"] = model_section.get("yolo_model", "yolov8s.pt")
+    
+    # === FIXED: Resolve relative yolo_model path ===
+    yolo_model_raw = model_section.get("yolo_model", "yolov8s.pt")
+    yolo_path = Path(yolo_model_raw)
+    if yolo_path.is_absolute():
+        cfg["YOLO_MODEL"] = str(yolo_path)
+    else:
+        cfg["YOLO_MODEL"] = str(project_root / yolo_path)
 
     cfg["DEVICE"] = model_section["device"]
     dtype_str = model_section["dtype"]
@@ -46,6 +53,17 @@ def load_config(config_path: Path = CONFIG_PATH) -> dict:
     # --- Evaluation Block ---
     eval_section = raw.get("evaluation", {})
     cfg["VISUALIZE_DETECTIONS"] = eval_section.get("visualize_detections", True)
+
+    # Resolve eval_yolo_model the same way
+    eval_yolo_raw = eval_section.get("eval_yolo_model")
+    if eval_yolo_raw:
+        eval_path = Path(eval_yolo_raw)
+        if eval_path.is_absolute():
+            cfg["EVAL_YOLO_MODEL"] = str(eval_path)
+        else:
+            cfg["EVAL_YOLO_MODEL"] = str(project_root / eval_path)
+    else:
+        cfg["EVAL_YOLO_MODEL"] = cfg["YOLO_MODEL"]
 
     # --- Paths ---
     cfg["INPUT_DIR"] = project_root / raw["paths"]["input_dir"]
