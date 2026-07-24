@@ -12,7 +12,11 @@ model:
   # Base checkpoint to fine-tune from. Using pretrained COCO weights gives
   # the model a head start (edges, shapes, textures) vs. training from
   # scratch, even though none of the COCO classes are weeds.
+<<<<<<< HEAD
   base_weights: "yolo26m.pt" # "yolov8n.pt" is smaller and faster, but less accurate. "yolov8s.pt" is a good balance of speed and accuracy.
+=======
+  base_weights: "yolo11m.pt" # "yolov8n.pt" is smaller and faster, but less accurate. "yolov8s.pt" is a good balance of speed and accuracy.
+>>>>>>> b811bdb6c93f5ebf451c5f0cb00ba3af7ef2f3ea
 
   # Where the final best.pt and training run artifacts are saved.
   project_dir: "runs/train"
