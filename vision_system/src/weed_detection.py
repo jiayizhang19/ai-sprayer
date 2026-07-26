@@ -93,8 +93,15 @@ def load_model():
     if MODEL_TYPE == "yolo":
         from ultralytics import YOLO
         model = YOLO(YOLO_MODEL)
-        print(f"✅ YOLOv8 loaded: {YOLO_MODEL}")
+        
+        # Extra info for debugging
+        model_path = str(YOLO_MODEL).lower()
+        if model_path.endswith(".engine"):
+            print(f"✅ TensorRT engine loaded: {YOLO_MODEL}")
+        else:
+            print(f"✅ YOLO model loaded: {YOLO_MODEL}")  
         return model, None
+
     else:
         from transformers import AutoProcessor, AutoModel
         print("Loading LocateAnything-3B (this may take a while on first run)...")
@@ -179,25 +186,51 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
 
 # ─── YOLO DETECTION with Per-Class Threshold and Centroid ───────────────────
 def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.1, device=cfg["DEVICE"],verbose=False)[0]
+    # Force half precision when using a TensorRT engine
+    use_half = str(YOLO_MODEL).lower().endswith(".engine")
+
+    results = model(
+        image,
+        conf=0.1,
+        device=cfg["DEVICE"],
+        half=use_half,
+        verbose=False
+    )
+
+    result = results[0]
+
+    # ---- Performance breakdown ----
+    print(
+        f"Ultralytics timing -> "
+        f"preprocess: {result.speed['preprocess']:.1f} ms | "
+        f"inference: {result.speed['inference']:.1f} ms | "
+        f"postprocess: {result.speed['postprocess']:.1f} ms"
+    )
+
     detections = []
-    for box in results.boxes:
+
+    for box in result.boxes:
         conf = float(box.conf[0])
         cls = int(box.cls[0])
-        label = results.names[cls]
-        
+        label = result.names[cls]
+
         if conf >= get_conf_threshold(label):
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
+
             detections.append({
-                "label": label, 
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2, 
+                "label": label,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
                 "confidence": conf,
                 "centroid_x": cx,
-                "centroid_y": cy
+                "centroid_y": cy,
             })
-    return detections, str(results)
+
+    return detections, str(result)
 
 
 # ─── LOCATEANYTHING HELPERS ─────────────────────────────────────────────────

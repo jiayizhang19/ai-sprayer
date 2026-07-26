@@ -29,19 +29,19 @@ MODELS_TO_EXPORT = [
         "name": "yolo26s_ep150_b8_lr0.001",
         "pt_path": PROJECT_ROOT / "runs/train/yolo26s_ep150_b8_lr0.001/weights/best.pt",
     },
-    {
-        "name": "yolo26m_ep150_b8_lr0.001",
-        "pt_path": PROJECT_ROOT / "runs/train/yolo26m_ep150_b8_lr0.001/weights/best.pt",
-    },
-    {
-        "name": "yolov8m_ep150_b8_lr0.001",
-        "pt_path": PROJECT_ROOT / "runs/train/yolov8m_ep150_b8_lr0.001/weights/best.pt",
-    },
+    # {
+    #     "name": "yolo26m_ep150_b8_lr0.001",
+    #     "pt_path": PROJECT_ROOT / "runs/train/yolo26m_ep150_b8_lr0.001/weights/best.pt",
+    # },
+    # {
+    #     "name": "yolov8m_ep150_b8_lr0.001",
+    #     "pt_path": PROJECT_ROOT / "runs/train/yolov8m_ep150_b8_lr0.001/weights/best.pt",
+    # },
 ]
 
 TENSORRT_DIR = PROJECT_ROOT / "runs" / "tensorrt_engines"
 ONNX_DIR     = PROJECT_ROOT / "runs" / "onnx"
-IMGSZ        = 800
+IMGSZ        = 640 # 800 or 640
 DEVICE       = 0
 
 
