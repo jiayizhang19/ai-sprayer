@@ -21,19 +21,26 @@
 | BROST | 250 | 59 | 47 | 0.8091 | 0.8418 | 0.8251 |
 
 ## Inference Timing — Overall
-- **Mean:** 141.6 ms  (7.06 FPS)
-- **Median:** 69.3 ms
-- **Std Dev:** 233.6 ms
-- **Mean (excl. first image / warm-up):** 120.0 ms (8.33 FPS)
+### End-to-End (wall-clock, includes pre/post-process + Python overhead)
+- **Mean:** 144.5 ms  (6.92 FPS)
+- **Median:** 80.2 ms
+- **Std Dev:** 259.7 ms
+- **Mean (excl. first image / warm-up):** 120.1 ms (8.33 FPS)
+
+### Pure Neural-Network Inference (Ultralytics `result.speed['inference']`)
+- **Mean:** 54.8 ms  (18.26 FPS)
+- **Median:** 52.6 ms
+- **Std Dev:** 11.6 ms
+- **Mean (excl. first image / warm-up):** 53.9 ms (18.54 FPS)
 
 ## Inference Timing — By Class Present in Image
 _Note: this groups images by which ground-truth classes they contain; it is the mean total inference time for images containing that class, not a per-detection or per-class model cost (YOLO predicts all classes in a single forward pass per image)._
 
 | Class Code | Mean Image Time (ms) | Images (n) |
 |--- |--- |--- |
-| STEME | 183.8 | 37 |
-| URTUR | 129.8 | 31 |
-| BROST | 110.1 | 39 |
+| STEME | 194.6 | 37 |
+| URTUR | 122.0 | 31 |
+| BROST | 114.4 | 39 |
 
 ## Setup Configuration Context
 - **Model Identifier:** `yolov8m_ep150_b8_lr0.001`
