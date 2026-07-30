@@ -5,11 +5,10 @@ Runs independent live inference on images using a configured evaluation model,
 and scores the results against ground truth annotations.
 
 Timing additions:
-- Per-image inference time (the only directly measured quantity)
-- Overall aggregate: mean / median / std / FPS (with and without first-image warm-up)
+- Per-image end-to-end (wall-clock) inference time
+- Per-image pure neural-network inference time (Ultralytics result.speed['inference'])
+- Overall aggregate: mean / median / std / FPS for both (with and without first-image warm-up)
 - Per-class-present grouping: mean image inference time for images containing each class
-  (this is image-level grouping, NOT per-detection/per-class timing — YOLO doesn't produce
-  a per-class inference cost since one forward pass predicts all classes at once)
 """
 
 import sys
@@ -262,13 +261,32 @@ def build_markdown_report(total_gt, total_pred, total_tp, total_fp, total_fn,
     lines.extend([
         "",
         "## Inference Timing — Overall",
-        f"- **Mean:** {timing_overall['mean_seconds']*1000:.1f} ms  "
-        f"({timing_overall['fps']:.2f} FPS)",
-        f"- **Median:** {timing_overall['median_seconds']*1000:.1f} ms",
-        f"- **Std Dev:** {timing_overall['std_seconds']*1000:.1f} ms",
+        "### End-to-End (wall-clock, includes pre/post-process + Python overhead)",
+        f"- **Mean:** {timing_overall['e2e_mean_seconds']*1000:.1f} ms  "
+        f"({timing_overall['e2e_fps']:.2f} FPS)",
+        f"- **Median:** {timing_overall['e2e_median_seconds']*1000:.1f} ms",
+        f"- **Std Dev:** {timing_overall['e2e_std_seconds']*1000:.1f} ms",
         f"- **Mean (excl. first image / warm-up):** "
-        f"{timing_overall['mean_seconds_excl_first']*1000:.1f} ms "
-        f"({timing_overall['fps_excl_first']:.2f} FPS)",
+        f"{timing_overall['e2e_mean_seconds_excl_first']*1000:.1f} ms "
+        f"({timing_overall['e2e_fps_excl_first']:.2f} FPS)",
+        "",
+        "### Pure Neural-Network Inference (Ultralytics `result.speed['inference']`)",
+    ])
+
+    if timing_overall.get("pure_nn_mean_ms") is not None:
+        lines.extend([
+            f"- **Mean:** {timing_overall['pure_nn_mean_ms']:.1f} ms  "
+            f"({timing_overall['pure_nn_fps']:.2f} FPS)",
+            f"- **Median:** {timing_overall['pure_nn_median_ms']:.1f} ms",
+            f"- **Std Dev:** {timing_overall['pure_nn_std_ms']:.1f} ms",
+            f"- **Mean (excl. first image / warm-up):** "
+            f"{timing_overall['pure_nn_mean_ms_excl_first']:.1f} ms "
+            f"({timing_overall['pure_nn_fps_excl_first']:.2f} FPS)",
+        ])
+    else:
+        lines.append("- *(not available – LocateAnything path or Ultralytics speed missing)*")
+
+    lines.extend([
         "",
         "## Inference Timing — By Class Present in Image",
         "_Note: this groups images by which ground-truth classes they contain; it is "
@@ -313,14 +331,20 @@ def main():
         pil_image = Image.open(img_path).convert("RGB")
         img_w, img_h = pil_image.size
 
-        # ─── Timed inference call (the only directly measured quantity) ────
+        # ─── Timed inference call ───────────────────────────────────────────
         t0 = time.perf_counter()
         if EVAL_MODEL_TYPE == "yolo":
-            detections, _ = weed_detection.detect_with_yolo(pil_image, model)
+            detections, _, speed = weed_detection.detect_with_yolo(pil_image, model)
+            pure_nn_ms = speed["inference_ms"]
         else:
             detections, _ = weed_detection.detect_with_locateanything(pil_image, model, processor, prompt)
-        inference_time = time.perf_counter() - t0
-        print(f"  → inference: {inference_time*1000:.1f} ms")
+            pure_nn_ms = None
+        e2e_seconds = time.perf_counter() - t0
+
+        if pure_nn_ms is not None:
+            print(f"  → end-to-end: {e2e_seconds*1000:.1f} ms | pure NN: {pure_nn_ms:.1f} ms")
+        else:
+            print(f"  → end-to-end: {e2e_seconds*1000:.1f} ms")
 
         gt_norm = load_ground_truth(img_path.name)
         gt_boxes = [
@@ -362,28 +386,41 @@ def main():
             "recall": metrics["recall"],
             "f1": f1,
             "mean_iou_matched": np.mean(metrics["matched_ious"]) if metrics["matched_ious"] else 0.0,
-            "inference_time_seconds": inference_time,
+            "e2e_inference_seconds": e2e_seconds,
+            "pure_nn_inference_ms": pure_nn_ms,
             "gt_classes": sorted(set(b["class_code"] for b in gt_norm)),
         })
 
     # ─── Timing aggregation ─────────────────────────────────────────────────
-    all_times = [m["inference_time_seconds"] for m in per_image_metrics]
-    warm_times = all_times[1:] if len(all_times) > 1 else all_times  # drop first-image warm-up
+    all_e2e = [m["e2e_inference_seconds"] for m in per_image_metrics]
+    warm_e2e = all_e2e[1:] if len(all_e2e) > 1 else all_e2e
+
+    pure_nn_list = [m["pure_nn_inference_ms"] for m in per_image_metrics if m["pure_nn_inference_ms"] is not None]
+    warm_pure = pure_nn_list[1:] if len(pure_nn_list) > 1 else pure_nn_list
 
     timing_overall = {
-        "mean_seconds": float(np.mean(all_times)) if all_times else 0.0,
-        "median_seconds": float(np.median(all_times)) if all_times else 0.0,
-        "std_seconds": float(np.std(all_times)) if all_times else 0.0,
-        "fps": float(1.0 / np.mean(all_times)) if all_times and np.mean(all_times) > 0 else 0.0,
-        "mean_seconds_excl_first": float(np.mean(warm_times)) if warm_times else 0.0,
-        "fps_excl_first": float(1.0 / np.mean(warm_times)) if warm_times and np.mean(warm_times) > 0 else 0.0,
+        # End-to-end (wall-clock)
+        "e2e_mean_seconds": float(np.mean(all_e2e)) if all_e2e else 0.0,
+        "e2e_median_seconds": float(np.median(all_e2e)) if all_e2e else 0.0,
+        "e2e_std_seconds": float(np.std(all_e2e)) if all_e2e else 0.0,
+        "e2e_fps": float(1.0 / np.mean(all_e2e)) if all_e2e and np.mean(all_e2e) > 0 else 0.0,
+        "e2e_mean_seconds_excl_first": float(np.mean(warm_e2e)) if warm_e2e else 0.0,
+        "e2e_fps_excl_first": float(1.0 / np.mean(warm_e2e)) if warm_e2e and np.mean(warm_e2e) > 0 else 0.0,
+
+        # Pure neural-network inference (Ultralytics)
+        "pure_nn_mean_ms": float(np.mean(pure_nn_list)) if pure_nn_list else None,
+        "pure_nn_median_ms": float(np.median(pure_nn_list)) if pure_nn_list else None,
+        "pure_nn_std_ms": float(np.std(pure_nn_list)) if pure_nn_list else None,
+        "pure_nn_fps": float(1000.0 / np.mean(pure_nn_list)) if pure_nn_list and np.mean(pure_nn_list) > 0 else None,
+        "pure_nn_mean_ms_excl_first": float(np.mean(warm_pure)) if warm_pure else None,
+        "pure_nn_fps_excl_first": float(1000.0 / np.mean(warm_pure)) if warm_pure and np.mean(warm_pure) > 0 else None,
     }
 
-    # Per-class-present timing: mean image inference time for images containing each class
+    # Per-class-present timing: mean image end-to-end time for images containing each class
     timing_by_class = {}
     for m in per_image_metrics:
         for cls in m["gt_classes"]:
-            timing_by_class.setdefault(cls, []).append(m["inference_time_seconds"])
+            timing_by_class.setdefault(cls, []).append(m["e2e_inference_seconds"])
     timing_by_class_summary = {
         cls: {"mean_seconds": float(np.mean(times)), "n_images": len(times)}
         for cls, times in timing_by_class.items()
@@ -418,7 +455,7 @@ def main():
     }
 
     # Generate files cleanly locally inside model_evaluation directory
-    platform_prefix = f"{EVAL_PLATFORM}_" if EVAL_PLATFORM and EVAL_PLATFORM != "unknown" else ""
+    platform_prefix = f"{EVAL_PLATFORM}_" if EVAL_PLATFORM and EVAL_PLATFORM not in ("unknown", "unspecified") else ""
     json_file = RESULTS_ROOT / f"{platform_prefix}eval_{MODEL_EXP_NAME}_results.json"
     md_file = RESULTS_ROOT / f"{platform_prefix}eval_{MODEL_EXP_NAME}_results.md"
 
@@ -449,8 +486,11 @@ def main():
     print(f"\n✅ Independent evaluation completed successfully!")
     print(f"   → Metrics JSON: {json_file.name}")
     print(f"   → Summary Report MD: {md_file.name}")
-    print(f"   → Overall: {timing_overall['fps']:.2f} FPS "
-          f"({timing_overall['mean_seconds']*1000:.1f} ms/image mean)")
+    print(f"   → End-to-end: {timing_overall['e2e_fps']:.2f} FPS "
+          f"({timing_overall['e2e_mean_seconds']*1000:.1f} ms/image mean)")
+    if timing_overall.get("pure_nn_mean_ms") is not None:
+        print(f"   → Pure NN:    {timing_overall['pure_nn_fps']:.2f} FPS "
+              f"({timing_overall['pure_nn_mean_ms']:.1f} ms/image mean)")
 
 
 if __name__ == "__main__":

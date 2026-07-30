@@ -230,7 +230,13 @@ def detect_with_yolo(image: Image.Image, model):
                 "centroid_y": cy,
             })
 
-    return detections, str(result)
+    # Return pure NN timing breakdown as well
+    speed = {
+        "preprocess_ms": float(result.speed["preprocess"]),
+        "inference_ms": float(result.speed["inference"]),   # pure neural-network time
+        "postprocess_ms": float(result.speed["postprocess"]),
+    }
+    return detections, str(result), speed
 
 
 # ─── LOCATEANYTHING HELPERS ─────────────────────────────────────────────────
@@ -342,7 +348,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
         t_start = time.time()
 
         if MODEL_TYPE == "yolo":
-            detections, raw_text = detect_with_yolo(pil_image, model)
+            detections, raw_text, _ = detect_with_yolo(pil_image, model)
         else:
             detections, raw_text = detect_with_locateanything(pil_image, model, processor, prompt)
 
@@ -360,7 +366,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
             "image": img_path.name,
             "weed_count": len(detections),
             "detections": detections,
-            "raw_output": raw_text[:500],
+            "raw_output": raw_text[:500] if MODEL_TYPE == "locateanything" else "",
             "inference_time_seconds": round(elapsed, 2),
         })
 
@@ -395,13 +401,6 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
 
     print(f"✅ Pipeline completed!")
     print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
-    all_results.append({
-            "image": img_path.name,
-            "weed_count": len(detections),
-            "detections": detections,
-            "raw_output": raw_text[:500] if MODEL_TYPE == "locateanything" else "",
-            "inference_time_seconds": round(elapsed, 2),
-        })
 
 
 if __name__ == "__main__":
