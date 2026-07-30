@@ -20,8 +20,6 @@ cfg = load_config()
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
-RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 MODEL_TYPE = cfg["MODEL_TYPE"]
 LOCATEANYTHING_ID = cfg["LOCATEANYTHING_ID"]
@@ -372,8 +370,8 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
 
         print(f"  → Detection data saved\n")
 
-    base_name = "yolo" if MODEL_TYPE == "yolo" else "locateanything"
-    detections_file = RESULTS_ROOT / f"{base_name}_detections.json"
+    # Save detections JSON into the same folder as the annotated images
+    detections_file = output_path / "weed_detections.json"
 
     config_info = {
         "model_type": MODEL_TYPE,
@@ -400,7 +398,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
         }, f, indent=2)
 
     print(f"✅ Pipeline completed!")
-    print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
+    print(f"   Detections saved to: {detections_file}")
 
 
 if __name__ == "__main__":
