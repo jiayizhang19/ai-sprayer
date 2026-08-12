@@ -20,8 +20,6 @@ cfg = load_config()
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_ROOT = PROJECT_ROOT / "yolo_vs_locateanything"
-RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 MODEL_TYPE = cfg["MODEL_TYPE"]
 LOCATEANYTHING_ID = cfg["LOCATEANYTHING_ID"]
@@ -93,8 +91,15 @@ def load_model():
     if MODEL_TYPE == "yolo":
         from ultralytics import YOLO
         model = YOLO(YOLO_MODEL)
-        print(f"✅ YOLOv8 loaded: {YOLO_MODEL}")
+        
+        # Extra info for debugging
+        model_path = str(YOLO_MODEL).lower()
+        if model_path.endswith(".engine"):
+            print(f"✅ TensorRT engine loaded: {YOLO_MODEL}")
+        else:
+            print(f"✅ YOLO model loaded: {YOLO_MODEL}")  
         return model, None
+
     else:
         from transformers import AutoProcessor, AutoModel
         print("Loading LocateAnything-3B (this may take a while on first run)...")
@@ -179,25 +184,57 @@ def draw_detections(image_bgr: np.ndarray, detections: list[dict]) -> np.ndarray
 
 # ─── YOLO DETECTION with Per-Class Threshold and Centroid ───────────────────
 def detect_with_yolo(image: Image.Image, model):
-    results = model(image, conf=0.1, device=cfg["DEVICE"],verbose=False)[0]
+    # Force half precision when using a TensorRT engine
+    use_half = str(YOLO_MODEL).lower().endswith(".engine")
+
+    results = model(
+        image,
+        conf=0.1,
+        device=cfg["DEVICE"],
+        half=use_half,
+        verbose=False
+    )
+
+    result = results[0]
+
+    # ---- Performance breakdown ----
+    print(
+        f"Ultralytics timing -> "
+        f"preprocess: {result.speed['preprocess']:.1f} ms | "
+        f"inference: {result.speed['inference']:.1f} ms | "
+        f"postprocess: {result.speed['postprocess']:.1f} ms"
+    )
+
     detections = []
-    for box in results.boxes:
+
+    for box in result.boxes:
         conf = float(box.conf[0])
         cls = int(box.cls[0])
-        label = results.names[cls]
-        
+        label = result.names[cls]
+
         if conf >= get_conf_threshold(label):
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
+
             detections.append({
-                "label": label, 
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2, 
+                "label": label,
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
                 "confidence": conf,
                 "centroid_x": cx,
-                "centroid_y": cy
+                "centroid_y": cy,
             })
-    return detections, str(results)
+
+    # Return pure NN timing breakdown as well
+    speed = {
+        "preprocess_ms": float(result.speed["preprocess"]),
+        "inference_ms": float(result.speed["inference"]),   # pure neural-network time
+        "postprocess_ms": float(result.speed["postprocess"]),
+    }
+    return detections, str(result), speed
 
 
 # ─── LOCATEANYTHING HELPERS ─────────────────────────────────────────────────
@@ -309,7 +346,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
         t_start = time.time()
 
         if MODEL_TYPE == "yolo":
-            detections, raw_text = detect_with_yolo(pil_image, model)
+            detections, raw_text, _ = detect_with_yolo(pil_image, model)
         else:
             detections, raw_text = detect_with_locateanything(pil_image, model, processor, prompt)
 
@@ -327,14 +364,14 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
             "image": img_path.name,
             "weed_count": len(detections),
             "detections": detections,
-            "raw_output": raw_text[:500],
+            "raw_output": raw_text[:500] if MODEL_TYPE == "locateanything" else "",
             "inference_time_seconds": round(elapsed, 2),
         })
 
         print(f"  → Detection data saved\n")
 
-    base_name = "yolo" if MODEL_TYPE == "yolo" else "locateanything"
-    detections_file = RESULTS_ROOT / f"{base_name}_detections.json"
+    # Save detections JSON into the same folder as the annotated images
+    detections_file = output_path / "weed_detections.json"
 
     config_info = {
         "model_type": MODEL_TYPE,
@@ -361,14 +398,7 @@ def process_folder(input_dir: str, output_dir: str, model, processor=None):
         }, f, indent=2)
 
     print(f"✅ Pipeline completed!")
-    print(f"   Detections saved to: {detections_file.relative_to(PROJECT_ROOT)}")
-    all_results.append({
-            "image": img_path.name,
-            "weed_count": len(detections),
-            "detections": detections,
-            "raw_output": raw_text[:500] if MODEL_TYPE == "locateanything" else "",
-            "inference_time_seconds": round(elapsed, 2),
-        })
+    print(f"   Detections saved to: {detections_file}")
 
 
 if __name__ == "__main__":
