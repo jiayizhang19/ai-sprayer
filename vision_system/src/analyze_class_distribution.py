@@ -33,6 +33,7 @@ def load_class_names() -> tuple[dict, dict]:
 
 def resolve_train_label_dir(data_cfg: dict) -> Path:
     dataset_root = (DATA_YAML_PATH.parent / data_cfg["path"]).resolve()
+    # split_rel_path = data_cfg.get("train", "images/train")
     split_rel_path = data_cfg.get("train", "images/train")
     img_dir = (dataset_root / split_rel_path).resolve()
     
@@ -130,12 +131,12 @@ def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instan
         autopct=make_autopct_with_values(total_imgs_sum),
         startangle=140,
         colors=img_colors,
-        pctdistance=0.72,
-        labeldistance=1.08,
+        pctdistance=0.82,
+        labeldistance=1.03,
         wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
     )
     ax1.set_title(f"Training Dataset Image Distribution\n(Total Disk Files: {actual_total_files:,} | Sum of Slices: {total_imgs_sum:,})", 
-                  fontsize=13, weight='bold', pad=15, color='#2c3e50')
+                  fontsize=18, weight='bold', pad=15, color='#2c3e50')
     ax1.axis('equal')
 
     # ─── RIGHT SUBPLOT: INSTANCE DISTRIBUTION (Objects Only) ────────────────
@@ -152,22 +153,23 @@ def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instan
         autopct=make_autopct_with_values(total_inst_sum),
         startangle=140,
         colors=inst_colors,
-        pctdistance=0.72,
-        labeldistance=1.08,
+        pctdistance=0.82,
+        labeldistance=1.03,
         wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
     )
     ax2.set_title(f"Training Dataset Instance Distribution\n(Total Labeled Object Boxes: {total_inst_sum:,})", 
-                  fontsize=13, weight='bold', pad=15, color='#2c3e50')
+                  fontsize=18, weight='bold', pad=15, color='#2c3e50')
     ax2.axis('equal')
 
     # ─── STYLING & AESTHETICS ───────────────────────────────────────────────
     for t in texts1 + texts2:
         t.set_color('#34495e')
-        t.set_fontsize(9.5)
+        t.set_weight('bold')
+        t.set_fontsize(15)
     for at in autotexts1 + autotexts2:
         at.set_color('white')
         at.set_weight('bold')
-        at.set_fontsize(8.5)
+        at.set_fontsize(15)
 
     plt.suptitle("AI-Sprayer Pipeline: Labeled Training Split Overview Matrix", 
                  fontsize=16, weight='bold', y=0.98, color='#2c3e50')
