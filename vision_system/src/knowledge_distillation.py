@@ -1,13 +1,13 @@
 """
-Knowledge Distillation: YOLO26m (teacher) → YOLO26s (student)
+Knowledge Distillation: yolo11m (teacher) → yolo11s (student)
 -------------------------------------------------------------
-Trains a YOLO26s student under guidance of your trained YOLO26m.
+Trains a yolo11s student under guidance of your trained yolo11m.
 Results are saved under runs/student_models/.
 
 The final markdown report compares three models side-by-side:
-  1. YOLO26m          (teacher)
-  2. YOLO26s baseline (no KD)
-  3. YOLO26s distilled
+  1. yolo11m          (teacher)
+  2. yolo11s baseline (no KD)
+  3. yolo11s distilled
 
 Metrics included:
   - Overall accuracy (Precision / Recall / mAP50 / mAP50-95)
@@ -32,8 +32,8 @@ TRAIN_CONFIG_PATH = PROJECT_ROOT / "config" / "train_config.yaml"
 # ──────────────────────────────────────────────────────────────
 # Edit these paths if your run folder names are different
 # ──────────────────────────────────────────────────────────────
-TEACHER_WEIGHTS    = PROJECT_ROOT / "runs/train/yolo26m_ep150_b8_lr0.001/weights/best.pt"
-BASELINE_S_WEIGHTS = PROJECT_ROOT / "runs/train/yolo26s_ep150_b8_lr0.001/weights/best.pt"
+TEACHER_WEIGHTS    = PROJECT_ROOT / "runs/train/yolo11m_ep150_b8_lr0.001/weights/best.pt"
+BASELINE_S_WEIGHTS = PROJECT_ROOT / "runs/train/yolo11s_ep150_b8_lr0.001/weights/best.pt"
 STUDENT_SIZE       = "s"          # "s" or "n"
 PROJECT_DIR        = PROJECT_ROOT / "runs" / "student_models"
 
@@ -44,7 +44,7 @@ def load_train_config(path: Path = TRAIN_CONFIG_PATH) -> dict:
 
     cfg = {}
     cfg["DATA_YAML"] = PROJECT_ROOT / raw["dataset"]["data_yaml"]
-    cfg["BASE_WEIGHTS"] = f"yolo26{STUDENT_SIZE}.pt"
+    cfg["BASE_WEIGHTS"] = f"yolo11{STUDENT_SIZE}.pt"
     cfg["PROJECT_DIR"] = PROJECT_DIR
     cfg["EPOCHS"] = raw["training"]["epochs"]
     cfg["IMAGE_SIZE"] = raw["training"]["image_size"]
@@ -194,17 +194,17 @@ def write_three_way_report(
 
 | Model | Parameters (M) | File Size (MB) | Notes |
 |:------|:--------------:|:--------------:|:------|
-| **YOLO26m (Teacher)** | {fmt(t_stats['params_m'], 2) if t_stats else "—"} | {fmt(t_stats['file_size_mb'], 1) if t_stats else "—"} | Upper-bound accuracy |
-| **YOLO26s (Baseline)** | {fmt(b_stats['params_m'], 2) if b_stats else "—"} | {fmt(b_stats['file_size_mb'], 1) if b_stats else "—"} | Same architecture, no KD |
-| **YOLO26s (Distilled)** | {fmt(d_stats['params_m'], 2) if d_stats else "—"} | {fmt(d_stats['file_size_mb'], 1) if d_stats else "—"} | Same architecture + KD |
+| **yolo11m (Teacher)** | {fmt(t_stats['params_m'], 2) if t_stats else "—"} | {fmt(t_stats['file_size_mb'], 1) if t_stats else "—"} | Upper-bound accuracy |
+| **yolo11s (Baseline)** | {fmt(b_stats['params_m'], 2) if b_stats else "—"} | {fmt(b_stats['file_size_mb'], 1) if b_stats else "—"} | Same architecture, no KD |
+| **yolo11s (Distilled)** | {fmt(d_stats['params_m'], 2) if d_stats else "—"} | {fmt(d_stats['file_size_mb'], 1) if d_stats else "—"} | Same architecture + KD |
 
-> Distilled and baseline YOLO26s should have **identical** parameter count and nearly identical file size.
+> Distilled and baseline yolo11s should have **identical** parameter count and nearly identical file size.
 
 ---
 
 ## 2. Overall Accuracy (Validation Split)
 
-| Metric | YOLO26m<br>(Teacher) | YOLO26s<br>(Baseline) | YOLO26s<br>(Distilled) | Δ vs Baseline | Δ vs Teacher |
+| Metric | yolo11m<br>(Teacher) | yolo11s<br>(Baseline) | yolo11s<br>(Distilled) | Δ vs Baseline | Δ vs Teacher |
 |:-------|:--------------------:|:---------------------:|:----------------------:|:-------------:|:------------:|
 | **Precision** | {fmt(t and t['precision'])} | {fmt(b and b['precision'])} | **{fmt(d and d['precision'])}** | {delta(d and d['precision'], b and b['precision'])} | {delta(d and d['precision'], t and t['precision'])} |
 | **Recall**    | {fmt(t and t['recall'])}    | {fmt(b and b['recall'])}    | **{fmt(d and d['recall'])}**    | {delta(d and d['recall'], b and b['recall'])}       | {delta(d and d['recall'], t and t['recall'])} |
@@ -238,13 +238,13 @@ def write_three_way_report(
 
 | Role | Path |
 |:-----|:-----|
-| Teacher (YOLO26m) | `{teacher_path}` |
-| Baseline (YOLO26s) | `{baseline_s_path}` |
-| Distilled (YOLO26s) | `{distilled_path}` |
+| Teacher (yolo11m) | `{teacher_path}` |
+| Baseline (yolo11s) | `{baseline_s_path}` |
+| Distilled (yolo11s) | `{distilled_path}` |
 
 ## Notes
 - Teacher is frozen during training; only the student + projector are updated.
-- Final `best.pt` contains **only the student** → identical parameter count and inference cost to a normal YOLO26s.
+- Final `best.pt` contains **only the student** → identical parameter count and inference cost to a normal yolo11s.
 - Distillation loss weight used: `dis=6.0` (increase to 8–10 for stronger teacher influence).
 """
 
@@ -261,12 +261,12 @@ def train():
     cfg["RUN_NAME"] = build_run_name(cfg)
 
     print("=" * 70)
-    print("Knowledge Distillation — YOLO26m → YOLO26s")
+    print("Knowledge Distillation — yolo11m → yolo11s")
     print("=" * 70)
 
     for p, label in [
-        (TEACHER_WEIGHTS, "Teacher (YOLO26m)"),
-        (BASELINE_S_WEIGHTS, "Baseline YOLO26s"),
+        (TEACHER_WEIGHTS, "Teacher (yolo11m)"),
+        (BASELINE_S_WEIGHTS, "Baseline yolo11s"),
     ]:
         if not p.exists():
             print(f"⚠️  {label} not found:\n     {p}")
@@ -324,14 +324,14 @@ def train():
         print(f"\nBest distilled student weights: {best_weights}")
 
         # ── Validate all three models ───────────────────────────
-        print("\n[1/3] Validating distilled YOLO26s ...")
+        print("\n[1/3] Validating distilled yolo11s ...")
         distilled_metrics = run_validation(
             student, runtime_data_yaml, cfg, run_dir, tag="distilled"
         )
 
         teacher_metrics = None
         if TEACHER_WEIGHTS.exists():
-            print("\n[2/3] Validating teacher YOLO26m ...")
+            print("\n[2/3] Validating teacher yolo11m ...")
             teacher_model = YOLO(str(TEACHER_WEIGHTS))
             teacher_metrics = run_validation(
                 teacher_model, runtime_data_yaml, cfg, run_dir, tag="teacher_m"
@@ -339,13 +339,13 @@ def train():
 
         baseline_s_metrics = None
         if BASELINE_S_WEIGHTS.exists():
-            print("\n[3/3] Validating baseline YOLO26s ...")
+            print("\n[3/3] Validating baseline yolo11s ...")
             baseline_model = YOLO(str(BASELINE_S_WEIGHTS))
             baseline_s_metrics = run_validation(
                 baseline_model, runtime_data_yaml, cfg, run_dir, tag="baseline_s"
             )
         else:
-            print("\n⚠️  Baseline YOLO26s weights not found — baseline column will show '—'.")
+            print("\n⚠️  Baseline yolo11s weights not found — baseline column will show '—'.")
 
         # ── Write the complete markdown report ──────────────────
         write_three_way_report(
