@@ -22,7 +22,14 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_YAML_PATH = PROJECT_ROOT / "config" / "data.yaml"
 
-OUTPUT_CHART = PROJECT_ROOT / "class_distribution.png"
+OUTPUT_CHART = PROJECT_ROOT / "test_class_distribution.png"
+
+# Friendly display names for the figure (code → readable name)
+DISPLAY_NAMES = {
+    "BROST": "Brome",
+    "STEME": "Chickweed",
+    "URTUR": "Nettle",
+}
 
 
 def load_class_names() -> tuple[dict, dict]:
@@ -31,10 +38,16 @@ def load_class_names() -> tuple[dict, dict]:
     return data_cfg.get("names", {}), data_cfg
 
 
+def to_display_name(raw_name: str) -> str:
+    """Map class code from data.yaml to a friendly figure label."""
+    key = str(raw_name).strip().upper()
+    return DISPLAY_NAMES.get(key, str(raw_name))
+
+
 def resolve_train_label_dir(data_cfg: dict) -> Path:
     dataset_root = (DATA_YAML_PATH.parent / data_cfg["path"]).resolve()
-    # split_rel_path = data_cfg.get("train", "images/train")
-    split_rel_path = data_cfg.get("train", "images/train")
+    split_rel_path = data_cfg.get("test", "images/test")
+    # split_rel_path = data_cfg.get("test", "images/test")
     img_dir = (dataset_root / split_rel_path).resolve()
     
     label_dir = Path(str(img_dir).replace("images", "labels", 1))
@@ -114,7 +127,7 @@ def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instan
     img_sorted = image_counts.most_common()
     img_cids = [item[0] for item in img_sorted]
     img_sizes = [item[1] for item in img_sorted]
-    img_labels = [class_names.get(cid, f"Class {cid}") for cid in img_cids]
+    img_labels = [to_display_name(class_names.get(cid, f"Class {cid}")) for cid in img_cids]
     img_colors = [class_color_map[cid] for cid in img_cids]
 
     # Append the explicit Background class if background files are present
@@ -136,14 +149,14 @@ def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instan
         wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
     )
     ax1.set_title(f"Training Dataset Image Distribution\n(Total Disk Files: {actual_total_files:,} | Sum of Slices: {total_imgs_sum:,})", 
-                  fontsize=18, weight='bold', pad=15, color='#2c3e50')
+                  fontsize=20, weight='bold', pad=15, color='#2c3e50')
     ax1.axis('equal')
 
     # ─── RIGHT SUBPLOT: INSTANCE DISTRIBUTION (Objects Only) ────────────────
     inst_sorted = instance_counts.most_common()
     inst_cids = [item[0] for item in inst_sorted]
     inst_sizes = [item[1] for item in inst_sorted]
-    inst_labels = [class_names.get(cid, f"Class {cid}") for cid in inst_cids]
+    inst_labels = [to_display_name(class_names.get(cid, f"Class {cid}")) for cid in inst_cids]
     inst_colors = [class_color_map[cid] for cid in inst_cids]
     total_inst_sum = sum(inst_sizes)
 
@@ -158,21 +171,21 @@ def save_dual_distribution_donuts(label_dir: Path, image_counts: Counter, instan
         wedgeprops=dict(width=0.35, edgecolor='w', linewidth=1.5)
     )
     ax2.set_title(f"Training Dataset Instance Distribution\n(Total Labeled Object Boxes: {total_inst_sum:,})", 
-                  fontsize=18, weight='bold', pad=15, color='#2c3e50')
+                  fontsize=20, weight='bold', pad=15, color='#2c3e50')
     ax2.axis('equal')
 
     # ─── STYLING & AESTHETICS ───────────────────────────────────────────────
     for t in texts1 + texts2:
         t.set_color('#34495e')
         t.set_weight('bold')
-        t.set_fontsize(15)
+        t.set_fontsize(18)
     for at in autotexts1 + autotexts2:
         at.set_color('white')
         at.set_weight('bold')
-        at.set_fontsize(15)
+        at.set_fontsize(18)
 
-    plt.suptitle("AI-Sprayer Pipeline: Labeled Training Split Overview Matrix", 
-                 fontsize=16, weight='bold', y=0.98, color='#2c3e50')
+    plt.suptitle("AI-Sprayer Pipeline: Labeled Test Split Overview Matrix", 
+                 fontsize=18, weight='bold', y=0.98, color='#2c3e50')
     
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=150)
